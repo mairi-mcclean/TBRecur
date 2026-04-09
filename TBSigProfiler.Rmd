@@ -1,0 +1,3035 @@
+---
+title: "TBSignatures_source_code_version"
+output: html_document
+date: "2025-02-27"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Set WD
+```{r setup, include=FALSE}
+if (!requireNamespace("devtools", quietly = TRUE)) 
+  install.packages("devtools")
+```
+## Extra packages
+```{r setup, include=FALSE}
+## Set WD to the package
+## Package functionality requires cloning of OG repo
+setwd(system.file(package = "TBSignatureProfiler")) 
+
+pkgs <- c("tidyverse","broom.mixed","RColorBrewer", "assertthat","data.table",
+          "shinythemes","pROC",'ROCit','ASSIGN','BiocParallel', 'ComplexHeatmap',
+          'DESeq2', 'edgeR', 'GSVA', 'S4Vectors', 'singscore', 
+          'SummarizedExperiment','wesanderson','ggmosaic', "caret", "gt","TBSignatureProfiler")
+lapply(pkgs, require, character.only = TRUE)
+```
+
+# Original signature functions
+```{r}
+### MAMS
+MAMS_6_med <- function(counts) {
+        genes = c("AIM2", "FCGR1BP", "CD274", "GBP1", "SMARCD3", "FLVCR2")
+    return(colMedians(counts[genes, ]))
+}
+
+MAMS_6_mean <- function(counts) {
+        genes = c("AIM2", "FCGR1BP", "CD274", "GBP1", "SMARCD3", "FLVCR2")
+    return(colMeans(counts[genes, ]))
+}
+
+## geometric mean
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+
+## RISK6
+calc_RiskGeo_6<-function(counts){
+        gene_set1=c('GBP2','FCGR1BP','SERPING1')
+        gene_set2=c('TUBGCP6','TRMT2A','SDR39U1')
+      return(gm_mean(counts[gene_set1],TRUE) - 
+               gm_mean(counts[gene_set2],TRUE))
+}
+
+### Sweeney-3
+sweeney3 = function(counts){
+   c((log2(counts['GBP5',]) + log2(counts['DUSP3',])) / 2 ) - log2(counts['KLF2',])
+}
+```
+
+```{r}
+## if required
+library(randomForest)
+library(glmnet)
+library(pROC)
+library(e1071)
+```
+
+# Read in data
+```{r pressure, echo=FALSE}
+## get counts
+count_dir <- ".../data"
+count_files <- list.files(count_dir, pattern = "_counts.csv",full.names = TRUE)
+count_files
+count_list <- lapply(count_files, read_csv)
+count_list[[1]]<-count_list[[1]]%>%
+  select(-index)
+
+counts_filtered<-lapply(count_list, function(counts){
+  keep <- rowSums(counts >= 10) >= 4
+  counts[keep,]
+})
+```
+
+### Count mtx formatting
+#### Week 0
+```{r}
+## Format individual count files; put back into list
+df<-counts_filtered[[1]]
+
+## Correct gene names
+df<-df %>%
+  mutate(symbol = case_when(
+    gene_id == "ENSG00000228696.12" ~ "ARL17B",
+    gene_id == "ENSG00000169627.9" ~ "BOLA2B",
+    gene_id == "ENSG00000283378.1" ~ "CNTNAP3C",
+    gene_id == "ENSG00000237541.4" ~ "HLA-DQA2",
+    gene_id == "ENSG00000260075.1" ~ "NSFP1",
+    gene_id == "ENSG00000183889.13" ~ "NPIPA6",
+    gene_id == "ENSG00000170667.16" ~ "RASA4B",
+    gene_id == "ENSG00000205572.11" ~ "SERF1B",
+    gene_id == "ENSG00000205571.15" ~ "SMN2",
+    gene_id == "ENSG00000274512.6" ~ "TBC1D3L",
+    gene_id == "ENSG00000269226.8" ~ "TMSB15C",
+    gene_id == "ENSG00000278970.5" ~ "HEIH",
+    gene_id == "ENSG00000278662.6" ~ "GOLGA6L10",
+    .default = symbol
+  ))
+
+# Novel transcripts - drop because probably not included in published signatures?
+novel_transcripts<-c('ENSG00000226266.9','ENSG00000289720.1','ENSG00000285508.2',
+                    'ENSG00000258790.1','ENSG00000289750.1','ENSG00000289755.2',
+                    'ENSG00000285723.2')
+df<- df[!(df$gene_id %in% novel_transcripts),]
+
+
+# Same gene, different transcript name? Drop lowest expression?
+duplicate_transcripts<-c('ENSG00000080947.16','ENSG00000287542.1','ENSG00000286112.1',
+                    'ENSG00000280987.4','ENSG00000223705.12', 'ENSG00000285253.1',
+                    'ENSG00000274615.1')
+df <- df[!(df$gene_id %in% duplicate_transcripts),]
+
+
+# drop rows with duplicate gex values + gene names (have different transcript)
+counts_r <- unique( df[ , 2:17 ] )
+
+# set rownames as symbol and drop gene_ids/old symbol
+df_temp<-tibble::column_to_rownames(counts_r,var='symbol')
+colnames(df_temp)
+
+### Reassign
+counts_filtered[[1]]<-df_temp
+```
+
+#### Week 1 
+```{r}
+df<-counts_filtered[[2]]
+
+## Correct gene names
+df <- df %>%
+  mutate(symbol = case_when(
+    gene_id == "ENSG00000228696.12" ~ "ARL17B",
+    gene_id == "ENSG00000169627.9" ~ "BOLA2B",
+    gene_id == "ENSG00000283378.1" ~ "CNTNAP3C",
+    gene_id == "ENSG00000237541.4" ~ "HLA-DQA2",
+    gene_id == "ENSG00000260075.1" ~ "NSFP1",
+    gene_id == "ENSG00000183889.13" ~ "NPIPA6",
+    gene_id == "ENSG00000170667.16" ~ "RASA4B",
+    gene_id == "ENSG00000205572.11" ~ "SERF1B",
+    gene_id == "ENSG00000205571.15" ~ "SMN2",
+    gene_id == "ENSG00000274512.6" ~ "TBC1D3L",
+    gene_id == "ENSG00000269226.8" ~ "TMSB15C",
+    gene_id == "ENSG00000278970.5" ~ "HEIH",
+    .default = symbol
+  ))
+
+# Novel transcripts - drop because probably not included in published signatures?
+
+novel_transcripts<-c('ENSG00000226266.9','ENSG00000289720.1','ENSG00000285508.2',
+                    'ENSG00000258790.1','ENSG00000289750.1','ENSG00000289755.2',
+                    'ENSG00000285723.2')
+df <- df[!(df$gene_id %in% novel_transcripts),]
+
+# Same gene, different transcript name? Drop lowest expression?
+
+# CROCCP3 - both same gene? ### drop ENSG00000080947.16?
+# HERC3 - same gene ### drop ENSG00000287542.1 - other ID listed in NIH as actual gene/listed as 'readthrough gene' in ensembl
+# KYAT1 == both same gene ### drop ENSG00000286112.1 -  other ID listed in NIH as actual gene/listed as 'readthrough gene' in ensembl
+# MATR3 == same gene ### drop 2 ENSG00000280987.4?
+# NSUN5P1 == same gene ### drop ENSG00000223705.12?
+# NPEPPSP1 == same gene ### drop ENSG00000274615.1; not listed in NIH as main ID; also not in TB signatures list
+# ZNF280D == seem to be for different genes; drop ENSG00000285253.1 (other ensID listed on GeneCards)
+duplicate_transcripts<-c('ENSG00000080947.16','ENSG00000287542.1','ENSG00000286112.1',
+                    'ENSG00000280987.4','ENSG00000223705.12', 'ENSG00000285253.1',
+                    'ENSG00000274615.1')
+df <- df[!(df$gene_id %in% duplicate_transcripts),]
+dim(df)
+
+# drop rows with duplicate gex values + gene names (have different transcript)
+counts_r <- unique( df[ , 2:17 ] )
+dim(counts_r)
+
+# set rownames as gene-ids and drop 'symbol'
+df_temp<-tibble::column_to_rownames(counts_r,var='symbol')
+
+counts_filtered[[2]]<-df_temp
+```
+
+
+#### Week 2 
+```{r}
+df<-counts_filtered[[4]]
+
+## Correct gene names
+df <- df %>%
+  mutate(symbol = case_when(
+    gene_id == "ENSG00000228696.12" ~ "ARL17B",
+    gene_id == "ENSG00000169627.9" ~ "BOLA2B",
+    gene_id == "ENSG00000283378.1" ~ "CNTNAP3C",
+    gene_id == "ENSG00000237541.4" ~ "HLA-DQA2",
+    gene_id == "ENSG00000260075.1" ~ "NSFP1",
+    gene_id == "ENSG00000183889.13" ~ "NPIPA6",
+    gene_id == "ENSG00000170667.16" ~ "RASA4B",
+    gene_id == "ENSG00000205572.11" ~ "SERF1B",
+    gene_id == "ENSG00000205571.15" ~ "SMN2",
+    gene_id == "ENSG00000274512.6" ~ "TBC1D3L",
+    gene_id == "ENSG00000269226.8" ~ "TMSB15C",
+    gene_id == "ENSG00000278970.5" ~ "HEIH",
+    .default = symbol
+  ))
+
+# Novel transcripts - drop because probably not included in published signatures?
+novel_transcripts<-c('ENSG00000226266.9','ENSG00000289720.1','ENSG00000285508.2',
+                    'ENSG00000258790.1','ENSG00000289750.1','ENSG00000289755.2',
+                    'ENSG00000285723.2','ENSG00000285269.2')
+df <- df[!(df$gene_id %in% novel_transcripts),]
+
+# Same gene, different transcript name? Drop lowest expression?
+
+duplicate_transcripts<-c('ENSG00000080947.16','ENSG00000287542.1','ENSG00000286112.1',
+                    'ENSG00000280987.4','ENSG00000223705.12','ENSG00000285253.1',
+                    'ENSG00000274615.1')
+df <- df[!(df$gene_id %in% duplicate_transcripts),]
+
+# drop rows with duplicate gex values + gene names (have different transcript)
+counts_r <- unique( df[ , 2:16 ] )
+
+# set rownames as gene-ids and drop 'symbol'
+df_temp<-tibble::column_to_rownames(counts_r,var='symbol')
+
+counts_filtered[[4]]<-df_temp
+```
+
+#### Week 9
+```{r}
+df<-counts_filtered[[6]]
+
+## Correct gene names
+df <- df %>%
+  mutate(symbol = case_when(
+    gene_id == "ENSG00000228696.12" ~ "ARL17B",
+    gene_id == "ENSG00000169627.9" ~ "BOLA2B",
+    gene_id == "ENSG00000283378.1" ~ "CNTNAP3C",
+    gene_id == "ENSG00000237541.4" ~ "HLA-DQA2",
+    gene_id == "ENSG00000260075.1" ~ "NSFP1",
+    gene_id == "ENSG00000183889.13" ~ "NPIPA6",
+    gene_id == "ENSG00000170667.16" ~ "RASA4B",
+    gene_id == "ENSG00000205572.11" ~ "SERF1B",
+    gene_id == "ENSG00000205571.15" ~ "SMN2",
+    gene_id == "ENSG00000274512.6" ~ "TBC1D3L",
+    gene_id == "ENSG00000269226.8" ~ "TMSB15C",
+    gene_id == "ENSG00000278970.5" ~ "HEIH",
+    .default = symbol
+  ))
+
+# Novel transcripts - drop because probably not included in published signatures?
+novel_transcripts<-c('ENSG00000226266.9','ENSG00000289720.1','ENSG00000285508.2',
+                    'ENSG00000258790.1','ENSG00000289750.1','ENSG00000289755.2',
+                    'ENSG00000285723.2', 'ENSG00000285269.2')
+df <- df[!(df$gene_id %in% novel_transcripts),]
+
+# Same gene, different transcript name? Drop lowest expression?
+duplicate_transcripts<-c('ENSG00000080947.16','ENSG00000287542.1','ENSG00000286112.1',
+                    'ENSG00000280987.4','ENSG00000223705.12','ENSG00000274615.1')
+df <- df[!(df$gene_id %in% duplicate_transcripts),]
+dim(df)
+
+# drop rows with duplicate gex values + gene names (have different transcript)
+counts_r <- unique( df[ , 2:15 ] )
+dim(counts_r)
+
+# set rownames as gene-ids and drop 'symbol'
+df_temp<-tibble::column_to_rownames(counts_r,var='symbol')
+colnames(df_temp) # check patient names/number
+
+counts_filtered[[6]]<-df_temp
+```
+
+#### Week 14
+```{r}
+df<-counts_filtered[[3]]
+
+## Correct gene names
+df <- df %>%
+  mutate(symbol = case_when(
+    gene_id == "ENSG00000228696.12" ~ "ARL17B",
+    gene_id == "ENSG00000169627.9" ~ "BOLA2B",
+    gene_id == "ENSG00000283378.1" ~ "CNTNAP3C",
+    gene_id == "ENSG00000237541.4" ~ "HLA-DQA2",
+    gene_id == "ENSG00000260075.1" ~ "NSFP1",
+    gene_id == "ENSG00000183889.13" ~ "NPIPA6",
+    gene_id == "ENSG00000170667.16" ~ "RASA4B",
+    gene_id == "ENSG00000205572.11" ~ "SERF1B",
+    gene_id == "ENSG00000205571.15" ~ "SMN2",
+    gene_id == "ENSG00000274512.6" ~ "TBC1D3L",
+    gene_id == "ENSG00000269226.8" ~ "TMSB15C",
+    gene_id == "ENSG00000278970.5" ~ "HEIH",
+    gene_id == "ENSG00000278662.6" ~ "GOLGA6L10",
+    .default = symbol
+  ))
+
+# Novel transcripts - drop because probably not included in published signatures?
+novel_transcripts<-c('ENSG00000226266.9','ENSG00000289720.1','ENSG00000285508.2',
+                    'ENSG00000258790.1','ENSG00000289750.1','ENSG00000289755.2',
+                    'ENSG00000285723.2', 'ENSG00000285269.2')
+# include 
+df <- df[!(df$gene_id %in% novel_transcripts),]
+
+# Same gene, different transcript name? Drop lowest expression?
+duplicate_transcripts<-c('ENSG00000080947.16','ENSG00000287542.1','ENSG00000286112.1',
+                    'ENSG00000280987.4','ENSG00000223705.12', 'ENSG00000274615.1',
+                    'ENSG00000285253.1')
+df <- df[!(df$gene_id %in% duplicate_transcripts),]
+dim(df)
+
+# drop rows with duplicate gex values + gene names (have different transcript)
+counts_r <- unique( df[ , 2:17 ] )
+dim(counts_r)
+
+# set rownames as gene-ids and drop 'symbol'
+df_temp<-tibble::column_to_rownames(counts_r,var='symbol')
+colnames(df_temp) # check patient names/number
+
+counts_filtered[[3]]<-df_temp
+```
+
+#### Week 26
+```{r}
+df<-counts_filtered[[5]]
+
+## Correct gene names
+df <- df %>%
+  mutate(symbol = case_when(
+    gene_id == "ENSG00000228696.12" ~ "ARL17B",
+    gene_id == "ENSG00000169627.9" ~ "BOLA2B",
+    gene_id == "ENSG00000283378.1" ~ "CNTNAP3C",
+    gene_id == "ENSG00000237541.4" ~ "HLA-DQA2",
+    gene_id == "ENSG00000260075.1" ~ "NSFP1",
+    gene_id == "ENSG00000183889.13" ~ "NPIPA6",
+    gene_id == "ENSG00000170667.16" ~ "RASA4B",
+    gene_id == "ENSG00000205572.11" ~ "SERF1B",
+    gene_id == "ENSG00000205571.15" ~ "SMN2",
+    gene_id == "ENSG00000274512.6" ~ "TBC1D3L",
+    gene_id == "ENSG00000269226.8" ~ "TMSB15C",
+    gene_id == "ENSG00000278970.5" ~ "HEIH",
+    gene_id == "ENSG00000278662.6" ~ "GOLGA6L10",
+    .default = symbol
+  ))
+
+# Novel transcripts - drop because probably not included in published signatures?
+novel_transcripts<-c('ENSG00000226266.9','ENSG00000289720.1','ENSG00000285508.2',
+                    'ENSG00000258790.1','ENSG00000289750.1','ENSG00000289755.2',
+                    'ENSG00000285723.2','ENSG00000285269.2')
+df <- df[!(df$gene_id %in% novel_transcripts),]
+
+# Same gene, different transcript name? Drop lowest expression?
+duplicate_transcripts<-c('ENSG00000080947.16','ENSG00000287542.1','ENSG00000286112.1',
+                    'ENSG00000280987.4','ENSG00000223705.12','ENSG00000274615.1',
+                    'ENSG00000285253.1')
+df <- df[!(df$gene_id %in% duplicate_transcripts),]
+dim(df)
+
+# drop rows with duplicate gex values + gene names (have different transcript)
+counts_r <- unique( df[ , 2:17 ] )
+dim(counts_r)
+
+# set rownames as gene-ids and drop 'symbol'
+df_temp<-tibble::column_to_rownames(counts_r,var='symbol')
+colnames(df) # check patient names/number
+
+counts_filtered[[5]]<-df_temp
+```
+
+
+## Metadata
+```{r}
+metadata<- read_csv('.../metadata.csv')
+dat<-tibble::column_to_rownames(metadata,var='scrno')
+dat$`...1`<-NULL
+dat$visit<-NULL
+
+### for all dfs in counts_filtered
+ignore_cols<-c("gene_id", "symbol")
+
+metadata_list <- lapply(counts_filtered, function(df) {
+  cols_to_keep <- setdiff(colnames(df), ignore_cols)
+  matched_rows <- dat[match(cols_to_keep, rownames(dat)), , drop = FALSE]
+  rownames(matched_rows) <- cols_to_keep
+  matched_rows
+})
+```
+
+# Set up SummarizedExperiment objects
+## Week 0
+```{r}
+## set objects
+se_0<-SummarizedExperiment(list(counts = as.matrix(counts_filtered[[1]])),
+                         colData=DataFrame(metadata_list[[1]]))
+se_0<- mkAssay(se_0, log = TRUE, counts_to_CPM = TRUE)
+
+# Get DESeq norm. ### will this be a problem if I've subset by the genes already? Recover how this is normalized
+data_in<-SummarizedExperiment::assay(se_0,'counts')
+res<-deseq2_norm_rle(data_in)
+
+## make a new object
+w0_norm<-SummarizedExperiment(list(counts=res),
+                         colData=DataFrame(metadata_list[[1]]))
+
+# Get VST trans
+## DESeq with normalized counts
+dds_0<- DESeqDataSetFromMatrix(countData=round(res),
+                               colData=DataFrame(metadata_list[[1]]),
+                               design = ~1)
+
+## Now transform with rlog/VST and save count mtx
+vsd<-vst(dds_0, blind=TRUE)
+check<-vsd@assays@data@listData[[1]]
+## add transformed mtx to SE object
+w0_norm@assays@data@listData[["vst_counts"]]<-check
+
+### Add log counts to w0_norm
+w0_norm@assays@data@listData[["log_counts"]]<-se_0@assays@data$log_counts
+```
+
+## Week 26
+```{r}
+# Get SummExp.
+se_26<-SummarizedExperiment(list(counts = as.matrix(counts_filtered[[5]])),
+                         colData=DataFrame(metadata_list[[5]]))
+se_26<- mkAssay(se_26, log = TRUE, counts_to_CPM = TRUE)
+
+## Get DESeq norm.
+data_in<-SummarizedExperiment::assay(se_26,'counts')
+res<-deseq2_norm_rle(data_in)
+
+## make a new object
+w26_norm<-SummarizedExperiment(list(counts=res),
+                         colData=DataFrame(metadata_list[[5]]))
+
+## Get VST transformation
+dds_26<- DESeqDataSetFromMatrix(countData=round(res),
+                               colData=DataFrame(metadata_list[[5]]),
+                               design = ~1)
+
+## Now transform with rlog/VST and save count mtx
+vsd<-vst(dds_26, blind=TRUE)
+check<-vsd@assays@data@listData[[1]]
+## add transformed mtx to SE object
+w26_norm@assays@data@listData[["vst_counts"]]<-check
+w26_norm@assays@data@listData[["log_counts"]]<-se_26@assays@data$log_counts
+```
+
+## Other timepoints
+### Week 1
+```{r}
+se_1<-SummarizedExperiment(list(counts = as.matrix(counts_filtered[[2]])),
+                         colData=DataFrame(metadata_list[[2]]))
+se_1<- mkAssay(se_1, log = TRUE, counts_to_CPM = TRUE)
+
+### will this be a problem if I've subset by the genes already? Recover how this is normalized
+data_in<-SummarizedExperiment::assay(se_1,'counts')
+res<-deseq2_norm_rle(data_in)
+
+## make a new object
+w1_norm<-SummarizedExperiment(list(counts=res),
+                         colData=DataFrame(metadata_list[[2]]))
+
+## DESeq with normalized counts
+dds_1<- DESeqDataSetFromMatrix(countData=round(res),
+                               colData=DataFrame(metadata_list[[2]]),
+                               design = ~1)
+## Now transform with rlog/VST and save count mtx
+vsd<-vst(dds_1, blind=TRUE)
+check<-vsd@assays@data@listData[[1]]
+## add transformed mtx to SE object
+w1_norm@assays@data@listData[["vst_counts"]]<-check
+w1_norm@assays@data@listData[["log_counts"]]<-se_1@assays@data$log_counts
+```
+
+
+### Week 2
+```{r}
+se_2<-SummarizedExperiment(list(counts = as.matrix(counts_filtered[[4]])),
+                         colData=DataFrame(metadata_list[[4]]))
+se_2<- mkAssay(se_2, log = TRUE, counts_to_CPM = TRUE)
+
+### will this be a problem if I've subset by the genes already? Recover how this is normalized
+data_in<-SummarizedExperiment::assay(se_2,'counts')
+res<-deseq2_norm_rle(data_in)
+
+## make a new object
+w2_norm<-SummarizedExperiment(list(counts=res),
+                         colData=DataFrame(metadata_list[[4]]))
+
+## DESeq with normalized counts
+dds_2<- DESeqDataSetFromMatrix(countData=round(res),
+                               colData=DataFrame(metadata_list[[4]]),
+                               design = ~1)
+## Now transform with rlog/VST and save count mtx
+vsd<-vst(dds_2, blind=TRUE)
+check<-vsd@assays@data@listData[[1]]
+## add transformed mtx to SE object
+w2_norm@assays@data@listData[["vst_counts"]]<-check
+w2_norm@assays@data@listData[["log_counts"]]<-se_2@assays@data$log_counts
+```
+
+
+### Week 9
+```{r}
+se_9<-SummarizedExperiment(list(counts = as.matrix(counts_filtered[[6]])),
+                         colData=DataFrame(metadata_list[[6]]))
+se_9<- mkAssay(se_9, log = TRUE, counts_to_CPM = TRUE)
+
+### will this be a problem if I've subset by the genes already? Recover how this is normalized
+data_in<-SummarizedExperiment::assay(se_9,'counts')
+res<-deseq2_norm_rle(data_in)
+
+## make a new object
+w9_norm<-SummarizedExperiment(list(counts=res),
+                         colData=DataFrame(metadata_list[[6]]))
+
+
+## DESeq with normalized counts
+dds_9<- DESeqDataSetFromMatrix(countData=round(res),
+                               colData=DataFrame(metadata_list[[6]]),
+                               design = ~1)
+## Now transform with rlog/VST and save count mtx
+vsd<-vst(dds_9, blind=TRUE)
+check<-vsd@assays@data@listData[[1]]
+## add transformed mtx to SE object
+w9_norm@assays@data@listData[["vst_counts"]]<-check
+w9_norm@assays@data@listData[["log_counts"]]<-se_9@assays@data$log_counts
+```
+
+
+### Week 14
+```{r}
+se_14<-SummarizedExperiment(list(counts = as.matrix(counts_filtered[[3]])),
+                         colData=DataFrame(metadata_list[[3]]))
+se_14<- mkAssay(se_14, log = TRUE, counts_to_CPM = TRUE)
+
+### will this be a problem if I've subset by the genes already? Recover how this is normalized
+data_in<-SummarizedExperiment::assay(se_14,'counts')
+res<-deseq2_norm_rle(data_in)
+
+## make a new object
+w14_norm<-SummarizedExperiment(list(counts=res),
+                         colData=DataFrame(metadata_list[[3]]))
+
+
+## DESeq with normalized counts
+dds_14<- DESeqDataSetFromMatrix(countData=round(res),
+                               colData=DataFrame(metadata_list[[3]]),
+                               design = ~1)
+## Now transform with rlog/VST and save count mtx
+vsd<-vst(dds_14, blind=TRUE)
+check<-vsd@assays@data@listData[[1]]
+## add transformed mtx to SE object
+w14_norm@assays@data@listData[["vst_counts"]]<-check
+w14_norm@assays@data@listData[["log_counts"]]<-se_14@assays@data$log_counts
+count_files
+```
+
+# Gene enrichment scores
+## W0
+```{r}
+## Run the TBSignatureProfiler to score the signatures in the data
+gsea_sigs<-TBsignatures[c("Heycken_FAIL_22", "Long_RES_10","Thompson_RES_5",
+                "Darboe_RISK_11", "Thompson_FAIL_13", "Tabone_RES_25", 
+                 "Manneh_RES_7")]
+sigs<-c("Heycken_FAIL_22", "Long_RES_10","Thompson_RES_5",
+                "Darboe_RISK_11", "Thompson_FAIL_13", "Tabone_RES_25", 
+                 "Manneh_RES_7")
+```
+
+```{r}
+gsea_logCPM_0 <- runTBsigProfiler(input = se_0,
+                                  useAssay = "log_counts_cpm",
+                                  signatures = gsea_sigs,
+                                  algorithm = "ssGSEA",
+                                  combineSigAndAlgorithm = TRUE,
+                                  parallel.sz = 1,
+                                  update_genes=FALSE)
+```
+
+### Heatmaps
+```{r}
+gsea_res <- as.data.frame(colData(gsea_logCPM_0))[, c("label", sigs)]
+DT::datatable(gsea_res) ## gives actual enrichment scores
+```
+
+```{r}
+colors <- RColorBrewer::brewer.pal(6, "Spectral")
+col.me <- circlize::colorRamp2(seq(from = -2, to = 2,
+                                   length.out = 6), colors)
+
+signatureHeatmap(gsea_logCPM_0, name = "Signature heatmap [GSVA] Week 0",
+                 signatureColNames = names(gsea_sigs),
+                 annotationColNames = "label",
+                 scale = TRUE, # check
+                 showColumnNames = TRUE,
+                 choose_color = col.me)
+
+```
+
+### AUCS
+#### Plots
+```{r}
+for (i in sigs){
+
+  cat("####", i, "\n")
+
+  print(signatureROCplot_CI(inputData = gsea_logCPM_0,
+                   signatureColNames = i,
+                   annotationColName = "label",
+                   name = paste("ROC plot,", i, sep = " "), pb.show = FALSE))
+  cat("\n\n")
+}
+```
+
+#### Tables
+```{r}
+tableAUC(gsea_logCPM_0,
+         annotationColName = "label",
+         signatureColNames = sigs,
+         num.boot = 100,
+         pb.show = FALSE)
+```
+
+## W26
+```{r}
+gsea_logCPM_26 <- runTBsigProfiler(input = se_26,
+                                  useAssay = "log_counts_cpm",
+                                  signatures = gsea_sigs,
+                                  algorithm = "ssGSEA",
+                                  combineSigAndAlgorithm = TRUE,
+                                  parallel.sz = 1,
+                                  update_genes=FALSE)
+```
+
+### Heatmaps
+```{r}
+gsea_res <- as.data.frame(colData(gsea_logCPM_26))[, c("label", gsea_sigs)]
+DT::datatable(gsea_res) ## gives actual enrichment scores
+```
+
+```{r}
+colors <- RColorBrewer::brewer.pal(6, "Spectral")
+col.me <- circlize::colorRamp2(seq(from = -2, to = 2,
+                                   length.out = 6), colors)
+
+signatureHeatmap(gsea_logCPM_26, name = "Signature heatmap [GSVA] Week 26",
+                 signatureColNames = names(gsea_sigs),
+                 annotationColNames = "label",
+                 scale = TRUE, # check
+                 showColumnNames = TRUE,
+                 choose_color = col.me)
+
+```
+
+### AUCS
+#### Plots
+```{r}
+for (i in sigs){
+
+  cat("####", i, "\n")
+
+  print(signatureROCplot_CI(inputData = gsea_logCPM_26,
+                   signatureColNames = i,
+                   annotationColName = "label",
+                   name = paste("ROC plot,", i, sep = " "), pb.show = FALSE))
+  cat("\n\n")
+}
+```
+
+#### Tables
+```{r}
+tableAUC(gsea_logCPM_26,
+         annotationColName = "label",
+         signatureColNames = sigs,
+         num.boot = 100,
+         pb.show = FALSE)
+```
+
+
+## Other timepoints
+### W1
+```{r}
+gsea_logCPM_1 <- runTBsigProfiler(input = se_1,
+                                  useAssay = "log_counts_cpm",
+                                  signatures = gsea_sigs,
+                                  algorithm = "ssGSEA",
+                                  combineSigAndAlgorithm = TRUE,
+                                  parallel.sz = 1,
+                                  update_genes=FALSE)
+```
+### Heatmaps
+```{r}
+gsea_res <- as.data.frame(colData(gsea_logCPM_1))[, c("label", gsea_sigs)]
+DT::datatable(gsea_res) ## gives actual enrichment scores
+```
+
+```{r}
+colors <- RColorBrewer::brewer.pal(6, "Spectral")
+col.me <- circlize::colorRamp2(seq(from = -2, to = 2,
+                                   length.out = 6), colors)
+
+signatureHeatmap(gsea_logCPM_1, name = "Signature heatmap [GSVA] Week 0",
+                 signatureColNames = names(gsea_sigs),
+                 annotationColNames = "label",
+                 scale = TRUE, # check
+                 showColumnNames = TRUE,
+                 choose_color = col.me)
+
+```
+
+### AUCS
+#### Plots
+```{r}
+for (i in sigs){
+
+  cat("####", i, "\n")
+
+  print(signatureROCplot_CI(inputData = gsea_logCPM_0,
+                   signatureColNames = i,
+                   annotationColName = "label",
+                   name = paste("ROC plot,", i, sep = " "), pb.show = FALSE))
+  cat("\n\n")
+}
+```
+
+#### Tables
+```{r}
+tableAUC(gsea_logCPM_1,
+         annotationColName = "label",
+         signatureColNames = sigs,
+         num.boot = 100,
+         pb.show = FALSE)
+```
+### W2
+```{r}
+gsea_logCPM_2 <- runTBsigProfiler(input = se_2,
+                                  useAssay = "log_counts_cpm",
+                                  signatures = gsea_sigs,
+                                  algorithm = "ssGSEA",
+                                  combineSigAndAlgorithm = TRUE,
+                                  parallel.sz = 1,
+                                  update_genes=FALSE)
+tableAUC(gsea_logCPM_2,
+         annotationColName = "label",
+         signatureColNames = sigs,
+         num.boot = 100,
+         pb.show = FALSE)
+
+```
+### W9
+```{r}
+gsea_logCPM_9 <- runTBsigProfiler(input = se_9,
+                                  useAssay = "log_counts_cpm",
+                                  signatures = gsea_sigs,
+                                  algorithm = "ssGSEA",
+                                  combineSigAndAlgorithm = TRUE,
+                                  parallel.sz = 1,
+                                  update_genes=FALSE)
+tableAUC(gsea_logCPM_9,
+         annotationColName = "label",
+         signatureColNames = sigs,
+         num.boot = 100,
+         pb.show = FALSE)
+```
+### W14
+```{r}
+gsea_logCPM_14 <- runTBsigProfiler(input = se_14,
+                                  useAssay = "log_counts_cpm",
+                                  signatures = gsea_sigs,
+                                  algorithm = "ssGSEA",
+                                  combineSigAndAlgorithm = TRUE,
+                                  parallel.sz = 1,
+                                  update_genes=FALSE)
+```
+
+## AUCs over time for GSEA values
+```{r}
+gsea_auc0<-tableAUC(gsea_logCPM_0,
+         annotationColName = "label",
+         signatureColNames = sigs,
+         num.boot = 100,
+         pb.show = FALSE)$x$data %>%
+   mutate(tp='0')%>%
+  dplyr::select(-c(P.value, neg10xLog.P.value.))
+
+gsea_auc1<-tableAUC(gsea_logCPM_1,
+         annotationColName = "label",
+         signatureColNames = sigs,
+         num.boot = 100,
+         pb.show = FALSE)$x$data %>%
+   mutate(tp='1')%>%
+  dplyr::select(-c(P.value, neg10xLog.P.value.))
+
+gsea_auc2<-tableAUC(gsea_logCPM_2,
+         annotationColName = "label",
+         signatureColNames = sigs,
+         num.boot = 100,
+         pb.show = FALSE)$x$data %>%
+   mutate(tp='2')%>%
+  dplyr::select(-c(P.value, neg10xLog.P.value.))
+
+gsea_auc9<-tableAUC(gsea_logCPM_9,
+         annotationColName = "label",
+         signatureColNames = sigs,
+         num.boot = 100,
+         pb.show = FALSE)$x$data %>%
+   mutate(tp='9')%>%
+  dplyr::select(-c(P.value, neg10xLog.P.value.))
+
+gsea_auc14<-tableAUC(gsea_logCPM_14,
+         annotationColName = "label",
+         signatureColNames = sigs,
+         num.boot = 100,
+         pb.show = FALSE)$x$data %>%
+   mutate(tp='14')%>%
+  dplyr::select(-c(P.value, neg10xLog.P.value.))
+
+gsea_auc26<-tableAUC(gsea_logCPM_26,
+         annotationColName = "label",
+         signatureColNames = sigs,
+         num.boot = 100,
+         pb.show = FALSE)$x$data %>%
+   mutate(tp='26')%>%
+  dplyr::select(-c(P.value, neg10xLog.P.value.))
+
+gsea_auc_all<-rbind(gsea_auc0,gsea_auc1,gsea_auc2,gsea_auc9,gsea_auc14,gsea_auc26)
+gsea_auc_all
+```
+
+
+```{r}
+melted_data <- reshape2::melt(gsea_auc_all,
+                              measure.vars=c('AUC'))
+
+melted_data <- melted_data[order(melted_data$Timepoint), ]
+
+# Color by timepoint
+## Reorder data
+melted_data$tp<- gdata::reorder.factor(
+    melted_data$tp,
+    new.order = c('0','1','2','9','14', '26'))
+col_palette = c(brewer.pal(9,"Greens")[4:9])
+
+# Color by Signature
+melted_data$Signatures<-fct_reorder(melted_data$Signature, melted_data$value, 
+                                    .fun=mean, .desc = TRUE)
+col_palette = c(brewer.pal(8,"Dark2")[1:9])
+
+
+### Change colors 
+p<-ggplot(melted_data, aes(x=tp, y=value,color=Signatures)) + 
+  geom_pointrange(aes(ymin=LowerAUC, ymax=UpperAUC),
+                  position = position_dodge(width = 0.5) )+
+  labs(title = "ssGSEA AUROC for recurrence prediction")+
+  scale_y_continuous(name="AUC")+
+  scale_color_manual(
+    values = col_palette,
+    labels=c('Manneh-7','Long-11','Darboe-11 [RISK11]',
+                               'Tabone-25','TB22','Thompson-5 [RESPONSE5]',
+                               'Thompson-13 [FAILURE]')
+  ) + 
+  labs(color = "Signatures", x="Weeks on treatment") +
+  theme_minimal()
+
+p
+
+ggsave("AUROCs_GSEA_signatures.png", p, width = 9, height = 4,
+       dpi=100)
+```
+
+# Get original signature calculations
+## Within TBSigProfiler
+### Add signatures to TBSigProf object
+```{r}
+# no normalization genes
+TBSignatureProfiler:::addTBsignature(c("AIM2", "FCGR1BP", "CD274", "GBP1", "SMARCD3", "FLVCR2"),
+      authname='MAMS_med',
+      signame_common = "MAMS6_med",
+      sigtype='response',
+      tissuetype='whole blood',
+      saveobjs = TRUE,
+      views = TRUE
+)
+
+TBSignatureProfiler:::addTBsignature(c("GBP2", "FCGR1B", "SERPING1", "TUBGCP6", "TRMT2A", "SDR39U1"),
+      authname='RISK6geo',
+      signame_common = "RISK6geo",
+      sigtype='response',
+      tissuetype='whole blood',
+      saveobjs = TRUE,
+      views = TRUE
+)
+
+
+### 15.09.25 add new relapse signature from Sutherland
+TBSignatureProfiler:::addTBsignature(c("CCR6","CTSW","GADD45B","GZMH","LEF1",
+                                       "MARCKS","NLRC4"),
+      authname='Manneh',
+      signame_common = "Manneh7",
+      sigtype='response',
+      tissuetype='whole blood',
+      saveobjs = TRUE,
+      views = TRUE
+)
+
+##THEN: have to re-load TBsignatures.Rda into environment manually via console ###
+#### every time after a single signature is added
+names(TBsignatures)
+```
+
+
+```{r}
+## make copy
+week0_dat<- w0_norm
+week26_dat<- w26_norm
+
+week1_dat<- w1_norm
+week2_dat<- w2_norm
+week9_dat<- w9_norm
+week14_dat<- w14_norm
+```
+
+```{r}
+## Use DESeq normalized counts - from w0_norm object/copy of object
+### for Sweeney - calculate here and also by hand
+w0_ogmodels<- evaluateOriginalModel(input = week0_dat, 
+                                      geneSignaturesName = c("Sweeney_OD_3",
+                                                             "Zak_RISK_16"),
+                                      useAssay = "counts")
+
+w26_ogmodels<- evaluateOriginalModel(input = week26_dat, 
+                                      geneSignaturesName = c("Sweeney_OD_3",
+                                                             "Zak_RISK_16"),
+                                      useAssay = "counts")
+
+### with different transformations
+w0_vst_models<- evaluateOriginalModel(input = week0_dat, 
+                                      geneSignaturesName = c("Sweeney_OD_3",
+                                                             "Zak_RISK_16"),
+                                      useAssay = "vst_counts")
+
+w26_vst_models<- evaluateOriginalModel(input = week26_dat, 
+                                      geneSignaturesName = c("Sweeney_OD_3",
+                                                             "Zak_RISK_16"),
+                                      useAssay = "vst_counts")
+```
+
+```{r}
+w1_ogmodels<- evaluateOriginalModel(input = week1_dat, 
+                                      geneSignaturesName = c("Sweeney_OD_3",
+                                                             "Zak_RISK_16"),
+                                      useAssay = "counts")
+
+w2_ogmodels<- evaluateOriginalModel(input = week2_dat, 
+                                      geneSignaturesName = c("Sweeney_OD_3",
+                                                             "Zak_RISK_16"),
+                                      useAssay = "counts")
+
+w9_ogmodels<- evaluateOriginalModel(input = week9_dat, 
+                                      geneSignaturesName = c("Sweeney_OD_3",
+                                                             "Zak_RISK_16"),
+                                      useAssay = "counts")
+
+
+w14_ogmodels<- evaluateOriginalModel(input = week14_dat, 
+                                      geneSignaturesName = c("Sweeney_OD_3",
+                                                             "Zak_RISK_16"),
+                                      useAssay = "counts")
+
+```
+
+### ROC AUC 
+#### W0
+```{r}
+tableAUC(w0_ogmodels,
+         annotationColName = 'label',
+         signatureColNames = c("Sweeney_OD_3_OriginalModel","Zak_RISK_16_OriginalModel"),
+         num.boot = 100,
+         pb.show = FALSE)
+```
+
+#### W26
+```{r}
+tableAUC(w26_ogmodels,
+         annotationColName = 'label',
+         signatureColNames = c("Sweeney_OD_3_OriginalModel","Zak_RISK_16_OriginalModel"),
+         num.boot = 100,
+         pb.show = FALSE)
+```
+
+##### [using VST counts]
+###### W0 
+```{r}
+tableAUC(w0_vst_models,
+         annotationColName = 'label',
+         signatureColNames = c("Sweeney_OD_3_OriginalModel","Zak_RISK_16_OriginalModel"),
+         num.boot = 100,
+         pb.show = FALSE)
+```
+###### W26
+```{r}
+tableAUC(w26_vst_models,
+         annotationColName = 'label',
+         signatureColNames = c("Sweeney_OD_3_OriginalModel","Zak_RISK_16_OriginalModel"),
+         num.boot = 100,
+         pb.show = FALSE)
+```
+
+#### ROC curves
+##### W0
+```{r}
+og_sigs_TBSP<- c("Sweeney_OD_3_OriginalModel", "Zak_RISK_16_OriginalModel")
+
+for (i in og_sigs_TBSP){
+
+  cat("####", i, "\n")
+
+  print(signatureROCplot_CI(inputData = w0_ogmodels,
+                   signatureColNames = i,
+                   annotationColName = "label",
+                   name = paste("ROC plot,", i, sep = " "), pb.show = FALSE))
+  cat("\n\n")
+}
+```
+
+##### W26
+```{r}
+
+for (i in og_sigs_TBSP){
+
+  cat("####", i, "\n")
+
+  print(signatureROCplot_CI(inputData = w26_ogmodels,
+                   signatureColNames = i,
+                   annotationColName = "label",
+                   name = paste("ROC plot,", i, sep = " "), pb.show = FALSE))
+  cat("\n\n")
+}
+```
+
+## Outside TBSigProfiler
+> To add Vargas signatures, etc
+
+```{r}
+## to find location of gene in SE object: match(c("FLVCR2"),SummarizedExperiment@NAMES)
+# ensure that Riskgeo_6 signature is added to TBsignaturesSplit object
+TBsignaturesSplit$Riskgeo_6 <- list(
+  Riskgeo_6_up=c('GBP2', 'FCGR1B', 'SERPING1'),
+  Riskgeo_6_dn=c('TUBGCP6', 'TRMT2A', 'SDR39U1')
+)
+
+TBsignaturesSplit$MAMS6_med <- list(
+  MAMS6_up=c("AIM2", "FCGR1BP", "CD274"),
+  MAMS6_dn=c("GBP1", "SMARCD3", "FLVCR2")
+)
+```
+
+#### Week 0
+```{r}
+### Get counts mtx from SE object
+w0_mtx<-SummarizedExperiment::assay(w0_norm,'counts')
+
+#MAMS
+MAMS_med<-MAMS_6_med(w0_mtx)
+names(MAMS_med)<-NULL
+MAMS_means<-MAMS_6_mean(w0_mtx)
+names(MAMS_means)<-NULL
+
+#RISK6Geo
+risk6_geo_scores<-apply(w0_mtx, 2, calc_RiskGeo_6)
+names(risk6_geo_scores)<-NULL
+
+## Sweeney - do on normalized counts? - 
+## OG paper: "microarray data: background corrected using normal-exponential method, 
+##            then quantile-normalized", then log transformed
+## Warinske validation paper: normalized the data then calculated log in formula
+Sweeney_sc<-sweeney3(w0_mtx)
+names(Sweeney_sc)<-NULL
+
+## Check that res cols and SE subjectIDs order match
+w0_ogmodels@colData@rownames == colnames(w0_mtx)
+# sig values stored:
+w0_ogmodels@colData@listData[["MAMS_6_med_OriginalModel"]]<-MAMS_med
+w0_ogmodels@colData@listData[["MAMS_6_mean_OriginalModel"]]<-MAMS_means
+w0_ogmodels@colData@listData[["RISKgeo_6_OriginalModel"]]<-risk6_geo_scores
+w0_ogmodels@colData@listData[["Sweeney_Add_OriginalModel"]]<-Sweeney_sc
+```
+
+#### Week 26
+```{r}
+### get DESeq normalized counts version in object
+w26_mtx<-SummarizedExperiment::assay(w26_norm,'counts')
+
+# MAMS
+MAMS_med<-MAMS_6_med(w26_mtx)
+names(MAMS_med)<-NULL
+MAMS_means<-MAMS_6_mean(w26_mtx)
+names(MAMS_means)<-NULL
+
+## RISK_6
+risk6_geo_scores<-apply(w26_mtx, 2, calc_RiskGeo_6)
+names(risk6_geo_scores)<-NULL
+
+### Sweeney
+Sweeney_sc<-sweeney3(w26_mtx)
+names(Sweeney_sc)<-NULL
+
+## Check that res cols and SE subjectIDs order match
+w26_ogmodels@colData@rownames == colnames(w26_mtx)
+# sig values stored:
+w26_ogmodels@colData@listData[["MAMS_6_med_OriginalModel"]]<-MAMS_med
+w26_ogmodels@colData@listData[["MAMS_6_mean_OriginalModel"]]<-MAMS_means
+w26_ogmodels@colData@listData[["RISKgeo_6_OriginalModel"]]<-risk6_geo_scores
+w26_ogmodels@colData@listData[["Sweeney_Add_OriginalModel"]]<-Sweeney_sc
+```
+
+### Interim timepoints
+#### Week 1
+```{r}
+### get DESeq normalized counts version in object
+w1_mtx<-SummarizedExperiment::assay(w1_norm,'counts')
+
+# MAMS
+MAMS_med<-MAMS_6_med(w1_mtx)
+names(MAMS_med)<-NULL
+MAMS_means<-MAMS_6_mean(w1_mtx)
+names(MAMS_means)<-NULL
+
+## RISK_6
+risk6_geo_scores<-apply(w1_mtx, 2, calc_RiskGeo_6)
+names(risk6_geo_scores)<-NULL
+
+### Sweeney
+Sweeney_sc<-sweeney3(w1_mtx)
+names(Sweeney_sc)<-NULL
+
+## Check that res cols and SE subjectIDs order match
+w1_ogmodels@colData@rownames == colnames(w1_mtx)
+# sig values stored:
+w1_ogmodels@colData@listData[["MAMS_6_med_OriginalModel"]]<-MAMS_med
+w1_ogmodels@colData@listData[["MAMS_6_mean_OriginalModel"]]<-MAMS_means
+w1_ogmodels@colData@listData[["RISKgeo_6_OriginalModel"]]<-risk6_geo_scores
+w1_ogmodels@colData@listData[["Sweeney_Add_OriginalModel"]]<-Sweeney_sc
+```
+
+#### Week 2
+```{r}
+### get DESeq normalized counts version in object
+w2_mtx<-SummarizedExperiment::assay(w2_norm,'counts')
+
+# MAMS
+MAMS_med<-MAMS_6_med(w2_mtx)
+names(MAMS_med)<-NULL
+MAMS_means<-MAMS_6_mean(w2_mtx)
+names(MAMS_means)<-NULL
+
+## RISK_6
+risk6_geo_scores<-apply(w2_mtx, 2, calc_RiskGeo_6)
+names(risk6_geo_scores)<-NULL
+
+### Sweeney
+Sweeney_sc<-sweeney3(w2_mtx)
+names(Sweeney_sc)<-NULL
+
+## Check that res cols and SE subjectIDs order match
+w2_ogmodels@colData@rownames == colnames(w2_mtx)
+# sig values stored:
+w2_ogmodels@colData@listData[["MAMS_6_med_OriginalModel"]]<-MAMS_med
+w2_ogmodels@colData@listData[["MAMS_6_mean_OriginalModel"]]<-MAMS_means
+w2_ogmodels@colData@listData[["RISKgeo_6_OriginalModel"]]<-risk6_geo_scores
+w2_ogmodels@colData@listData[["Sweeney_Add_OriginalModel"]]<-Sweeney_sc
+```
+
+#### Week 9
+```{r}
+### get DESeq normalized counts version in object
+w9_mtx<-SummarizedExperiment::assay(w9_norm,'counts')
+
+# MAMS
+MAMS_med<-MAMS_6_med(w9_mtx)
+names(MAMS_med)<-NULL
+MAMS_means<-MAMS_6_mean(w9_mtx)
+names(MAMS_means)<-NULL
+
+## RISK_6
+risk6_geo_scores<-apply(w9_mtx, 2, calc_RiskGeo_6)
+names(risk6_geo_scores)<-NULL
+
+### Sweeney
+Sweeney_sc<-sweeney3(w9_mtx)
+names(Sweeney_sc)<-NULL
+
+## Check that res cols and SE subjectIDs order match
+w9_ogmodels@colData@rownames == colnames(w9_mtx)
+# sig values stored:
+w9_ogmodels@colData@listData[["MAMS_6_med_OriginalModel"]]<-MAMS_med
+w9_ogmodels@colData@listData[["MAMS_6_mean_OriginalModel"]]<-MAMS_means
+w9_ogmodels@colData@listData[["RISKgeo_6_OriginalModel"]]<-risk6_geo_scores
+w9_ogmodels@colData@listData[["Sweeney_Add_OriginalModel"]]<-Sweeney_sc
+```
+
+#### Week 14
+```{r}
+### get DESeq normalized counts version in object
+w14_mtx<-SummarizedExperiment::assay(w14_norm,'counts')
+
+# MAMS
+MAMS_med<-MAMS_6_med(w14_mtx)
+names(MAMS_med)<-NULL
+MAMS_means<-MAMS_6_mean(w14_mtx)
+names(MAMS_means)<-NULL
+
+## RISK_6
+risk6_geo_scores<-apply(w14_mtx, 2, calc_RiskGeo_6)
+names(risk6_geo_scores)<-NULL
+
+### Sweeney
+Sweeney_sc<-sweeney3(w14_mtx)
+names(Sweeney_sc)<-NULL
+
+## Check that res cols and SE subjectIDs order match
+w14_ogmodels@colData@rownames == colnames(w14_mtx)
+# sig values stored:
+w14_ogmodels@colData@listData[["MAMS_6_med_OriginalModel"]]<-MAMS_med
+w14_ogmodels@colData@listData[["MAMS_6_mean_OriginalModel"]]<-MAMS_means
+w14_ogmodels@colData@listData[["RISKgeo_6_OriginalModel"]]<-risk6_geo_scores
+w14_ogmodels@colData@listData[["Sweeney_Add_OriginalModel"]]<-Sweeney_sc
+```
+
+
+### Add Vargas signatures
+```{r}
+data_dir <- ".../data"
+csv_files <- list.files(data_dir, pattern = "Vargas_scores.csv",full.names = TRUE)
+csv_files
+data_list <- lapply(csv_files, read.csv)
+```
+
+```{r}
+## Format rows to match order of se objects
+data_list[[1]]<-data_list[[1]][match(w0_ogmodels@colData@rownames, data_list[[1]]$X),]
+w0_ogmodels@colData@rownames == data_list[[1]]$X
+
+data_list[[2]]<-data_list[[2]][match(w1_ogmodels@colData@rownames, data_list[[2]]$X),]
+w1_ogmodels@colData@rownames == data_list[[2]]$X
+
+data_list[[3]]<-data_list[[3]][match(w2_ogmodels@colData@rownames, data_list[[3]]$X),]
+w2_ogmodels@colData@rownames == data_list[[3]]$X
+
+data_list[[4]]<-data_list[[4]][match(w9_ogmodels@colData@rownames, data_list[[4]]$X),]
+w9_ogmodels@colData@rownames == data_list[[4]]$X
+
+data_list[[5]]<-data_list[[5]][match(w14_ogmodels@colData@rownames, data_list[[5]]$X),]
+w14_ogmodels@colData@rownames == data_list[[5]]$X
+
+data_list[[6]]<-data_list[[6]][match(w26_ogmodels@colData@rownames, data_list[[6]]$X),]
+w26_ogmodels@colData@rownames == data_list[[6]]$X
+```
+
+```{r}
+### add vargas scores to objects
+w0_ogmodels@colData@listData[["Vargas_OriginalModel"]]<-data_list[[1]]$df_1_scores
+w1_ogmodels@colData@listData[["Vargas_OriginalModel"]]<-data_list[[2]]$df_2_scores
+w2_ogmodels@colData@listData[["Vargas_OriginalModel"]]<-data_list[[3]]$df_3_scores
+w9_ogmodels@colData@listData[["Vargas_OriginalModel"]]<-data_list[[4]]$df_4_scores
+w14_ogmodels@colData@listData[["Vargas_OriginalModel"]]<-data_list[[5]]$df_5_scores
+w26_ogmodels@colData@listData[["Vargas_OriginalModel"]]<-data_list[[6]]$df_6_scores
+```
+
+### Tabone signature
+```{r}
+# by timepoint
+tb25<-TBsignatures$Tabone_RES_25
+tb27<-TBsignatures$Tabone_RES_27
+tb27
+
+## change names of genes to correspond with our mapping
+tb27[5]<- 'SEPTIN4'
+tb27[24]<- 'FCGR1BP'
+```
+
+#### WK26
+```{r}
+##### log2 FC on VST normalized counts
+## get W0 in df form
+w0_df<-as.data.frame(w0_mtx)
+### subset by signatures
+df<- w0_df[rownames(w0_df) %in% tb27,]
+
+df<-t(df)
+w0_tb27<-as.data.frame(df)
+### Add time label to column end
+colnames(w0_tb27) <-paste0(colnames(w0_tb27), "_0")
+
+## WK26
+## get W26 in df form
+### 10.12.25: Use the normalised counts and then calculate the log2FC; not the
+### VST_Transformed counts - this would complicate the FC calculation
+w26_df<-as.data.frame(w26_mtx)
+### subset by signatures
+df<- w26_df[rownames(w26_df) %in% tb27,]
+df<-t(df) 
+w26_tb27<-as.data.frame(df)
+### Add time label to column end
+colnames(w26_tb27) <-paste0(colnames(w26_tb27), "_26")
+
+# NOTE:# BA170X doesn't have both w0 and w26 timepoint - can't get FC
+setdiff(rownames(w0_tb27), rownames(w26_tb27)) 
+
+### Merge 
+merged_df<-merge(w0_tb27, w26_tb27,by="row.names")
+
+## Get FC by timepoint
+fc_df<-data.frame(row.names=merged_df$Row.names)
+test<-data.frame(row.names=merged_df$Row.names)
+
+for (gene in tb27){
+  col_t1<-paste0(gene, "_0")
+  col_t2<-paste0(gene, "_26")
+  if (col_t1 %in% colnames(merged_df)&& col_t2 %in% colnames(merged_df)){
+    t1<-merged_df[[col_t1]]
+    t2<-merged_df[[col_t2]]
+    fc_df[[gene]]<-abs(log2((t2+1) / (t1 + 1))) ## changed 10.12.25
+  }
+}
+
+#Should use differences in vst_counts, or ratio of only normalised counts
+
+fc_df$tb27_score<- rowMeans(fc_df) ## Mean molecular distance from T0 in 27 study genes
+
+#### Add to signature dfs
+scores<-rep(NA,ncol(w26_ogmodels))
+names(scores)<-colnames(w26_ogmodels)
+length(scores)
+
+matched<-intersect(rownames(fc_df), colnames(w26_ogmodels))
+scores[matched]<-fc_df[matched, "tb27_score"]
+## Add to object, including NAs
+colData(w26_ogmodels)$Tabone27_OriginalModel<-scores
+```
+
+#### WK1
+```{r}
+## get W1 in df form
+w1_df<-as.data.frame(w1_mtx)
+### subset by signatures
+df<- w1_df[rownames(w1_df) %in% tb27,]
+df<-t(df) 
+w1_tb27<-as.data.frame(df)
+### Add time label to column end
+colnames(w1_tb27) <-paste0(colnames(w1_tb27), "_1")
+
+# NOTE:# BA170X doesn't have both w0 and w26 timepoint - can't get FC
+setdiff(rownames(w0_tb27), rownames(w1_tb27)) 
+
+### Merge 
+merged_df<-merge(w0_tb27, w1_tb27,by="row.names")
+
+## Get FC by timepoint
+fc_df<-data.frame(row.names=merged_df$Row.names)
+test<-data.frame(row.names=merged_df$Row.names)
+
+for (gene in tb27){
+  col_t1<-paste0(gene, "_0")
+  col_t2<-paste0(gene, "_1")
+  if (col_t1 %in% colnames(merged_df)&& col_t2 %in% colnames(merged_df)){
+    t1<-merged_df[[col_t1]]
+    t2<-merged_df[[col_t2]]
+    fc_df[[gene]]<-abs(log2((t2+1) / (t1 + 1)))
+  }
+}
+
+fc_df$tb27_score<- rowMeans(fc_df) ## Mean molecular distance from T0 in 27 study genes
+
+#### Add to signature dfs
+scores<-rep(NA,ncol(w1_ogmodels))
+names(scores)<-colnames(w1_ogmodels)
+length(scores)
+
+matched<-intersect(rownames(fc_df), colnames(w1_ogmodels))
+scores[matched]<-fc_df[matched, "tb27_score"]
+## Add to object, including NAs
+colData(w1_ogmodels)$Tabone27_OriginalModel<-scores
+```
+
+#### WK2 
+```{r}
+## get W2 in df form
+w2_df<-as.data.frame(w2_mtx)
+### subset by signatures
+df<- w2_df[rownames(w2_df) %in% tb27,]
+df<-t(df) 
+w2_tb27<-as.data.frame(df)
+### Add time label to column end
+colnames(w2_tb27) <-paste0(colnames(w2_tb27), "_2")
+
+# NOTE:# BA170X doesn't have both w0 and w26 timepoint - can't get FC
+setdiff(rownames(w0_tb27), rownames(w2_tb27)) 
+
+### Merge 
+merged_df<-merge(w0_tb27, w2_tb27,by="row.names")
+
+## Get FC by timepoint
+fc_df<-data.frame(row.names=merged_df$Row.names)
+test<-data.frame(row.names=merged_df$Row.names)
+
+for (gene in tb27){
+  col_t1<-paste0(gene, "_0")
+  col_t2<-paste0(gene, "_2")
+  if (col_t1 %in% colnames(merged_df)&& col_t2 %in% colnames(merged_df)){
+    t1<-merged_df[[col_t1]]
+    t2<-merged_df[[col_t2]]
+    fc_df[[gene]]<-abs(log2((t2+1) / (t1 + 1))) 
+  }
+}
+
+fc_df$tb27_score<- rowMeans(fc_df) ## Mean molecular distance from T0 in 27 study genes
+
+#### Add to signature dfs
+scores<-rep(NA,ncol(w2_ogmodels))
+names(scores)<-colnames(w2_ogmodels)
+length(scores)
+
+matched<-intersect(rownames(fc_df), colnames(w2_ogmodels))
+scores[matched]<-fc_df[matched, "tb27_score"]
+## Add to object, including NAs
+colData(w2_ogmodels)$Tabone27_OriginalModel<-scores
+```
+
+
+
+#### WK9
+```{r}
+## get W9 in df form
+w9_df<-as.data.frame(w9_mtx)
+### subset by signatures
+df<- w9_df[rownames(w9_df) %in% tb27,]
+df<-t(df) 
+w9_tb27<-as.data.frame(df)
+### Add time label to column end
+colnames(w9_tb27) <-paste0(colnames(w9_tb27), "_9")
+
+# NOTE:# BA170X doesn't have both w0 and w26 timepoint - can't get FC
+setdiff(rownames(w0_tb27), rownames(w9_tb27)) 
+
+### Merge 
+merged_df<-merge(w0_tb27, w9_tb27,by="row.names")
+
+## Get FC by timepoint
+fc_df<-data.frame(row.names=merged_df$Row.names)
+test<-data.frame(row.names=merged_df$Row.names)
+
+for (gene in tb27){
+  col_t1<-paste0(gene, "_0")
+  col_t2<-paste0(gene, "_9")
+  if (col_t1 %in% colnames(merged_df)&& col_t2 %in% colnames(merged_df)){
+    t1<-merged_df[[col_t1]]
+    t2<-merged_df[[col_t2]]
+    fc_df[[gene]]<-abs(log2((t2+1) / (t1 + 1)))
+  }
+}
+
+fc_df$tb27_score<- rowMeans(fc_df) ## Mean molecular distance from T0 in 27 study genes
+
+#### Add to signature dfs
+scores<-rep(NA,ncol(w9_ogmodels))
+names(scores)<-colnames(w9_ogmodels)
+length(scores)
+
+matched<-intersect(rownames(fc_df), colnames(w9_ogmodels))
+scores[matched]<-fc_df[matched, "tb27_score"]
+## Add to object, including NAs
+colData(w9_ogmodels)$Tabone27_OriginalModel<-scores
+```
+
+#### WK14
+```{r}
+## get W9 in df form
+w14_df<-as.data.frame(w14_mtx)
+### subset by signatures
+df<- w14_df[rownames(w14_df) %in% tb27,]
+df<-t(df) 
+w14_tb27<-as.data.frame(df)
+### Add time label to column end
+colnames(w14_tb27) <-paste0(colnames(w14_tb27), "_14")
+
+# NOTE:# BA170X doesn't have both w0 and w26 timepoint - can't get FC
+setdiff(rownames(w0_tb27), rownames(w14_tb27)) 
+
+### Merge 
+merged_df<-merge(w0_tb27, w14_tb27,by="row.names")
+
+## Get FC by timepoint
+fc_df<-data.frame(row.names=merged_df$Row.names)
+test<-data.frame(row.names=merged_df$Row.names)
+
+for (gene in tb27){
+  col_t1<-paste0(gene, "_0")
+  col_t2<-paste0(gene, "_14")
+  if (col_t1 %in% colnames(merged_df)&& col_t2 %in% colnames(merged_df)){
+    t1<-merged_df[[col_t1]]
+    t2<-merged_df[[col_t2]]
+    fc_df[[gene]]<-abs(log2((t2+1) / (t1 + 1)))
+  }
+}
+
+fc_df$tb27_score<- rowMeans(fc_df) ## Mean molecular distance from T0 in 27 study genes
+
+#### Add to signature dfs
+scores<-rep(NA,ncol(w14_ogmodels))
+names(scores)<-colnames(w14_ogmodels)
+length(scores)
+
+matched<-intersect(rownames(fc_df), colnames(w14_ogmodels))
+scores[matched]<-fc_df[matched, "tb27_score"]
+## Add to object, including NAs
+colData(w14_ogmodels)$Tabone27_OriginalModel<-scores
+```
+
+## Own plotting code
+#### Format data
+```{r}
+roc_0 <-as.data.frame(w0_ogmodels@colData)%>%
+  mutate(label_binary =if_else(label=='control', 0,1))
+roc_1 <-as.data.frame(w1_ogmodels@colData)%>%
+  mutate(label_binary =if_else(label=='control', 0,1))
+roc_2 <-as.data.frame(w2_ogmodels@colData)%>%
+  mutate(label_binary =if_else(label=='control', 0,1))
+roc_9 <-as.data.frame(w9_ogmodels@colData)%>%
+  mutate(label_binary =if_else(label=='control', 0,1))
+roc_14 <-as.data.frame(w14_ogmodels@colData)%>%
+  mutate(label_binary =if_else(label=='control', 0,1))
+roc_26 <-as.data.frame(w26_ogmodels@colData)%>%
+  mutate(label_binary =if_else(label=='control', 0,1))
+```
+
+### ROC
+```{r}
+roc.list <- list(roc1 <- roc(y_true, sweeneymodel),
+                roc6 <- roc(y_true, Tabone27),
+                roc3 <- roc(y_true, MAMSmodel),
+                roc5 <- roc(y_true, Vargas),
+                roc2 <- roc(y_true, risk16model),
+                roc4 <- roc(y_true, RISK6))
+
+p <- ggroc(roc.list, aes=c("color"),legacy.axes = TRUE) + 
+  theme_minimal() + 
+  geom_abline(slope=1, intercept = 0, linetype = "dashed", alpha=0.7, color = "grey") + 
+  coord_equal()+
+  labs(color='Gene Signature',x = "1-Specificity (FPR)", y = "Sensitivity (TPR)",
+                title = 'AUC for recurrence prediction at Week 26 treatment')+
+  scale_color_discrete(labels=c(paste0("Sweeney-3 (AUC =",
+                                       sprintf("%.3f", roc.list[[1]]$auc), ")"),
+                                paste0("RISK-16 (AUC =",
+                                       sprintf("%.3f", roc.list[[2]]$auc), ")"),
+                                paste0("MAMS-6 (AUC =",
+                                       sprintf("%.3f", roc.list[[3]]$auc), ")"),
+                                paste0("RISK-6 (AUC =",
+                                       sprintf("%.3f", roc.list[[4]]$auc), ")"),
+                                paste0("Vargas-18 (AUC =",
+                                       sprintf("%.3f", roc.list[[5]]$auc), ")"),
+                                paste0("Tabone-27 (AUC =",
+                                       sprintf("%.3f", roc.list[[6]]$auc), ")")
+                                )) 
+p
+
+ggsave('WK26_AUC_combined.png',p, dpi=600,bg='white',
+       width = 6, height = 4)
+
+```
+
+#### Get Delong value for each AUC
+```{r}
+# Here results from roc == results from ROCit::rocit - match in TBSigProfiler
+## W0
+roc.list_0 <- list(
+  Sweeney_3 = roc(roc_0$label_binary, roc_0$Sweeney_Add_OriginalModel),
+  Risk_16 = roc(roc_0$label_binary, roc_0$Zak_RISK_16_OriginalModel),
+  MAMS_6 = roc(roc_0$label_binary, roc_0$MAMS_6_mean_OriginalModel),
+  RISK6 = roc(roc_0$label_binary, roc_0$RISKgeo_6_OriginalModel),
+  Vargas = roc(roc_0$label_binary, roc_0$Vargas_OriginalModel)
+)
+
+# Get AUC + DeLong CI for each 
+auc_df_0 <- do.call(rbind, lapply(names(roc.list_0), function(name) {
+  roc_obj <- roc.list_0[[name]]
+  ci_auc <- ci.auc(roc_obj, method = "delong")
+  data.frame(
+    Model = name,
+    auc = as.numeric(roc_obj$auc),
+    ci_lower = ci_auc[1],
+    ci_upper = ci_auc[3]
+  )
+}))
+
+## W1
+roc.list_1 <- list(
+  Sweeney_3 = roc(roc_1$label_binary, roc_1$Sweeney_Add_OriginalModel),
+  Risk_16 = roc(roc_1$label_binary, roc_1$Zak_RISK_16_OriginalModel),
+  MAMS_6 = roc(roc_1$label_binary, roc_1$MAMS_6_mean_OriginalModel),
+  RISK6 = roc(roc_1$label_binary, roc_1$RISKgeo_6_OriginalModel),
+  Vargas = roc(roc_1$label_binary, roc_1$Vargas_OriginalModel),
+  Tabone = roc(roc_1$label_binary, roc_1$Tabone27_OriginalModel)
+)
+
+# Get AUC + DeLong CI for each 
+auc_df_1 <- do.call(rbind, lapply(names(roc.list_1), function(name) {
+  roc_obj <- roc.list_1[[name]]
+  ci_auc <- ci.auc(roc_obj, method = "delong")
+  data.frame(
+    Model = name,
+    auc = as.numeric(roc_obj$auc),
+    ci_lower = ci_auc[1],
+    ci_upper = ci_auc[3]
+  )
+}))
+
+## W2
+roc.list_2 <- list(
+  Sweeney_3 = roc(roc_2$label_binary, roc_2$Sweeney_Add_OriginalModel),
+  Risk_16 = roc(roc_2$label_binary, roc_2$Zak_RISK_16_OriginalModel),
+  MAMS_6 = roc(roc_2$label_binary, roc_2$MAMS_6_mean_OriginalModel),
+  RISK6 = roc(roc_2$label_binary, roc_2$RISKgeo_6_OriginalModel),
+  Vargas = roc(roc_2$label_binary, roc_2$Vargas_OriginalModel),
+  Tabone = roc(roc_2$label_binary, roc_2$Tabone27_OriginalModel)
+)
+
+# Get AUC + DeLong CI for each 
+auc_df_2 <- do.call(rbind, lapply(names(roc.list_2), function(name) {
+  roc_obj <- roc.list_2[[name]]
+  ci_auc <- ci.auc(roc_obj, method = "delong")
+  data.frame(
+    Model = name,
+    auc = as.numeric(roc_obj$auc),
+    ci_lower = ci_auc[1],
+    ci_upper = ci_auc[3]
+  )
+}))
+
+### W9
+roc.list_9 <- list(
+  Sweeney_3 = roc(roc_9$label_binary, roc_9$Sweeney_Add_OriginalModel),
+  Risk_16 = roc(roc_9$label_binary, roc_9$Zak_RISK_16_OriginalModel),
+  MAMS_6 = roc(roc_9$label_binary, roc_9$MAMS_6_mean_OriginalModel),
+  RISK6 = roc(roc_9$label_binary, roc_9$RISKgeo_6_OriginalModel),
+  Vargas = roc(roc_9$label_binary, roc_9$Vargas_OriginalModel),
+  Tabone = roc(roc_9$label_binary, roc_9$Tabone27_OriginalModel)
+)
+
+# Get AUC + DeLong CI for each 
+auc_df_9 <- do.call(rbind, lapply(names(roc.list_9), function(name) {
+  roc_obj <- roc.list_9[[name]]
+  ci_auc <- ci.auc(roc_obj, method = "delong")
+  data.frame(
+    Model = name,
+    auc = as.numeric(roc_obj$auc),
+    ci_lower = ci_auc[1],
+    ci_upper = ci_auc[3]
+  )
+}))
+
+## W14
+roc.list_14 <- list(
+  Sweeney_3 = roc(roc_14$label_binary, roc_14$Sweeney_Add_OriginalModel),
+  Risk_16 = roc(roc_14$label_binary, roc_14$Zak_RISK_16_OriginalModel),
+  MAMS_6 = roc(roc_14$label_binary, roc_14$MAMS_6_mean_OriginalModel),
+  RISK6 = roc(roc_14$label_binary, roc_14$RISKgeo_6_OriginalModel),
+  Vargas = roc(roc_14$label_binary, roc_14$Vargas_OriginalModel),
+  Tabone = roc(roc_14$label_binary, roc_14$Tabone27_OriginalModel)
+)
+
+# Get AUC + DeLong CI for each 
+auc_df_14 <- do.call(rbind, lapply(names(roc.list_14), function(name) {
+  roc_obj <- roc.list_14[[name]]
+  ci_auc <- ci.auc(roc_obj, method = "delong")
+  data.frame(
+    Model = name,
+    auc = as.numeric(roc_obj$auc),
+    ci_lower = ci_auc[1],
+    ci_upper = ci_auc[3]
+  )
+}))
+
+## W26
+roc.list_26 <- list(
+  Sweeney_3 = roc(roc_26$label_binary, roc_26$Sweeney_Add_OriginalModel),
+  Risk_16 = roc(roc_26$label_binary, roc_26$Zak_RISK_16_OriginalModel),
+  MAMS_6 = roc(roc_26$label_binary, roc_26$MAMS_6_mean_OriginalModel),
+  RISK6 = roc(roc_26$label_binary, roc_26$RISKgeo_6_OriginalModel),
+  Vargas = roc(roc_26$label_binary, roc_26$Vargas_OriginalModel),
+  Tabone = roc(roc_26$label_binary, roc_26$Tabone27_OriginalModel)
+)
+
+# Get AUC + DeLong CI for each 
+auc_df_26 <- do.call(rbind, lapply(names(roc.list_26), function(name) {
+  roc_obj <- roc.list_26[[name]]
+  ci_auc <- ci.auc(roc_obj, method = "delong")
+  data.frame(
+    Model = name,
+    auc = as.numeric(roc_obj$auc),
+    ci_lower = ci_auc[1],
+    ci_upper = ci_auc[3]
+  )
+}))
+```
+
+#### Pairwise comparisons
+##### Wk0
+```{r}
+model_names<-names(roc.list_0)
+pairs<-combn(model_names, 2, simplify = F)
+
+pairwise_0<-do.call(rbind, lapply(pairs, function(pair){
+  roc1<-roc.list_0[[pair[1]]]
+  roc2<-roc.list_0[[pair[2]]]
+  
+  res<-roc.test(roc1,roc2,method="delong",paired=T)
+  
+  data.frame(
+    Model_1 = pair[1],
+    Model_2 = pair[2],
+    AUC_1 = as.numeric(roc1$auc),
+    AUC_2 = as.numeric(roc2$auc),
+    AUC_diff = as.numeric(roc1$auc)-as.numeric(roc2$auc),
+    pval = res$p.value
+  )
+}))
+
+```
+
+##### Wk1
+```{r}
+model_names<-names(roc.list_1)
+pairs<-combn(model_names, 2, simplify = F)
+
+pairwise_1<-do.call(rbind, lapply(pairs, function(pair){
+  roc1<-roc.list_1[[pair[1]]]
+  roc2<-roc.list_1[[pair[2]]]
+  
+  res<-roc.test(roc1,roc2,method="delong",paired=T)
+  
+  data.frame(
+    Model_1 = pair[1],
+    Model_2 = pair[2],
+    AUC_1 = as.numeric(roc1$auc),
+    AUC_2 = as.numeric(roc2$auc),
+    AUC_diff = as.numeric(roc1$auc)-as.numeric(roc2$auc),
+    pval = res$p.value
+  )
+}))
+
+```
+
+##### Wk2
+```{r}
+model_names<-names(roc.list_2)
+pairs<-combn(model_names, 2, simplify = F)
+
+pairwise_2<-do.call(rbind, lapply(pairs, function(pair){
+  roc1<-roc.list_2[[pair[1]]]
+  roc2<-roc.list_2[[pair[2]]]
+  
+  res<-roc.test(roc1,roc2,method="delong",paired=T)
+  
+  data.frame(
+    Model_1 = pair[1],
+    Model_2 = pair[2],
+    AUC_1 = as.numeric(roc1$auc),
+    AUC_2 = as.numeric(roc2$auc),
+    AUC_diff = as.numeric(roc1$auc)-as.numeric(roc2$auc),
+    pval = res$p.value
+  )
+}))
+sapply(roc.list_2, function(r) as.numeric(r$auc))
+```
+
+##### Wk9
+```{r}
+model_names<-names(roc.list_9)
+pairs<-combn(model_names, 2, simplify = F)
+
+pairwise_9<-do.call(rbind, lapply(pairs, function(pair){
+  roc1<-roc.list_9[[pair[1]]]
+  roc2<-roc.list_9[[pair[2]]]
+  
+  res<-roc.test(roc1,roc2,method="delong",paired=T)
+  
+  data.frame(
+    Model_1 = pair[1],
+    Model_2 = pair[2],
+    AUC_1 = as.numeric(roc1$auc),
+    AUC_2 = as.numeric(roc2$auc),
+    AUC_diff = as.numeric(roc1$auc)-as.numeric(roc2$auc),
+    pval = res$p.value
+  )
+}))
+sapply(roc.list_9, function(r) as.numeric(r$auc))
+```
+
+##### Wk14
+```{r}
+model_names<-names(roc.list_14)
+pairs<-combn(model_names, 2, simplify = F)
+
+pairwise_14<-do.call(rbind, lapply(pairs, function(pair){
+  roc1<-roc.list_14[[pair[1]]]
+  roc2<-roc.list_14[[pair[2]]]
+  
+  res<-roc.test(roc1,roc2,method="delong",paired=T)
+  
+  data.frame(
+    Model_1 = pair[1],
+    Model_2 = pair[2],
+    AUC_1 = as.numeric(roc1$auc),
+    AUC_2 = as.numeric(roc2$auc),
+    AUC_diff = as.numeric(roc1$auc)-as.numeric(roc2$auc),
+    pval = res$p.value
+  )
+}))
+
+```
+
+##### Wk26
+```{r}
+model_names<-names(roc.list_26)
+pairs<-combn(model_names, 2, simplify = F)
+
+pairwise_26<-do.call(rbind, lapply(pairs, function(pair){
+  roc1<-roc.list_26[[pair[1]]]
+  roc2<-roc.list_26[[pair[2]]]
+  
+  res<-roc.test(roc1,roc2,method="delong",paired=T)
+  
+  data.frame(
+    Model_1 = pair[1],
+    Model_2 = pair[2],
+    AUC_1 = as.numeric(roc1$auc),
+    AUC_2 = as.numeric(roc2$auc),
+    AUC_diff = as.numeric(roc1$auc)-as.numeric(roc2$auc),
+    pval = res$p.value
+  )
+}))
+```
+
+
+```{r}
+### Adjust all, if required
+## bind all dfs
+pairwise_26$p_adj <- p.adjust(pairwise_26$pval, method = "BH") 
+sessionInfo()
+```
+
+#### Separate ROC curves
+##### Week 0 
+```{r, fig.height=30, fig.width=30}
+#### with Youden's index and WHO TTP
+par(mfrow = c(3,2), pty="s", cex.lab=4, cex.axis=4,cex.main=4)
+
+for (sig in names(roc.list_0)){
+  plot(roc.list_0[[sig]], 
+       print.thres="best",
+       print.thres.best.method="youden",
+       print.thres.cex=3,
+       print.thres.pattern=ifelse(roc.list_0[[sig]]$percent, 
+                                  "%.1f (%.1f%%, %.1f%%)", "%.2f (%.2f, %.2f)"),
+       main=sig,
+       xlab="",
+       ylab="")
+  
+  mtext("Specificity", side = 1, line = 4, cex = 3)
+  mtext("Sensitivity", side = 2, line = 5, cex = 3)
+  points(0.70, 0.90, pch=19, col="cornflowerblue", cex=3)  # 90% sens, 70% spec
+  text(0.70, 0.90, "WHO TPP [90%,70%]",pos=3, cex=3,col="cornflowerblue")
+}
+#dev.off()
+```
+
+##### Week 1 
+```{r, fig.height=25, fig.width=25}
+#### with Youden's index and WHO TTP
+par(mfrow = c(3,2), pty="s", cex.lab=4, cex.axis=4,
+    mar = c(5, 5, 5,5),      # Margins: bottom, left, top, right (increase for more space)
+    oma = c(2, 2, 4, 2),      # Outer margins (for overall title)
+    mgp = c(5, 4, 1),
+    cex.main=4)
+
+for (sig in names(roc.list_1)){
+  plot(roc.list_1[[sig]], 
+       print.thres="best",
+       print.thres.best.method="youden", 
+       print.thres.cex=3,
+       print.thres.pattern=ifelse(roc.list_1[[sig]]$percent, 
+                                  "%.3f (%.1f%%, %.1f%%)", "%.2f (%.2f, %.2f)"),
+       main=sig,
+       xlab="",
+       ylab="")
+  
+  mtext("Specificity", side = 1, line = 4, cex = 3)
+  mtext("Sensitivity", side = 2, line = 5, cex = 3)
+#, legacy.axis=TRUE
+  points(0.80, 0.75, pch=19, col="coral3", cex=3)  # 75% sens, 80% spec
+  text(0.55, 0.75, "WHO TPP [75%, 80%]",pos=3, cex=3,col="coral3")
+}
+#dev.off()
+```
+
+##### Week 2 
+```{r, fig.height=25, fig.width=25}
+#### with Youden's index and WHO TTP
+par(mfrow = c(3,2), pty="s", cex.lab=4, cex.axis=4,
+    mar = c(5, 5, 5,5),      # Margins: bottom, left, top, right (increase for more space)
+    oma = c(2, 2, 4, 2),      # Outer margins (for overall title)
+    mgp = c(5, 4, 1),
+    cex.main=4)
+
+for (sig in names(roc.list_2)){
+  plot(roc.list_2[[sig]], 
+       print.thres="best",
+       #print.thres.best.method="youden",
+       print.thres.cex=3,
+       print.thres.pattern=ifelse(roc.list_2[[sig]]$percent, 
+                                  "%.1f (%.1f%%, %.1f%%)", "%.2f (%.2f, %.2f)"),
+       main=sig,
+       xlab="",
+       ylab="")
+  
+  mtext("Specificity", side = 1, line = 4, cex = 3)
+  mtext("Sensitivity", side = 2, line = 5, cex = 3)
+#, legacy.axis=TRUE
+  points(0.80, 0.75, pch=19, col="coral3", cex=3)  # 75% sens, 80% spec
+  text(0.45, 0.71, "WHO TPP [75%,80%]",pos=3, cex=3,col="coral3")
+}
+#dev.off()
+```
+
+##### Week 9 
+```{r, fig.height=25, fig.width=25}
+#### with Youden's index and WHO TTP
+par(mfrow = c(3,2), pty="s", cex.lab=4, cex.axis=4,
+    mar = c(5, 5, 5,5),      # Margins: bottom, left, top, right (increase for more space)
+    oma = c(2, 2, 4, 2),      # Outer margins (for overall title)
+    mgp = c(5, 4, 1),
+    cex.main=4)
+
+for (sig in names(roc.list_9)){
+  plot(roc.list_9[[sig]], 
+       print.thres="best",
+       print.thres.best.method="youden",
+       print.thres.cex=3,
+       print.thres.pattern=ifelse(roc.list_9[[sig]]$percent, 
+                                  "%.1f (%.1f%%, %.1f%%)", "%.2f (%.2f, %.2f)"),
+       main=sig,
+       xlab="",
+       ylab="")
+  
+  mtext("Specificity", side = 1, line = 4, cex = 3)
+  mtext("Sensitivity", side = 2, line = 5, cex = 3)
+#, legacy.axis=TRUE
+  points(0.80, 0.75, pch=19, col="coral3", cex=3)  # 75% sens, 80% spec
+  text(0.78, 0.75, "WHO TPP [75%,80%]",pos=4, cex=3,col="coral3")
+}
+#dev.off()
+```
+
+##### Week 14 
+```{r, fig.height=50, fig.width=50}
+#### with Youden's index and WHO TTP
+par(mfrow = c(3,2), pty="s", cex.lab=4, cex.axis=4,
+    mar = c(5, 5, 5,5),      # Margins: bottom, left, top, right (increase for more space)
+    oma = c(2, 2, 4, 2),      # Outer margins (for overall title)
+    mgp = c(5, 4, 1),
+    cex.main=4)
+
+for (sig in names(roc.list_14)){
+  plot(roc.list_14[[sig]], 
+       print.thres="best",
+       print.thres.best.method="youden",
+       print.thres.cex=3, 
+       print.thres.pattern=ifelse(roc.list_14[[sig]]$percent, 
+                                  "%.1f (%.1f%%, %.1f%%)", "%.2f (%.2f, %.2f)"),
+       main=sig,
+       xlab="",
+       ylab="")
+  
+  mtext("Specificity", side = 1, line = 4, cex = 3)
+  mtext("Sensitivity", side = 2, line = 5, cex = 3)
+#, legacy.axis=TRUE
+  points(0.80, 0.75, pch=19, col="coral3", cex=3)  # 75% sens, 80% spec
+  text(0.70, 0.80, "WHO TPP [75%,80%]",pos=3, cex=3,col="coral3")
+}
+#dev.off()
+```
+
+##### Week 26 
+```{r, fig.height=25, fig.width=25}
+#### with Youden's index and WHO TTP
+par(mfrow = c(3,2), pty="s", cex.lab=4, cex.axis=4,
+    mar = c(5, 5, 5,5),      # Margins: bottom, left, top, right (increase for more space)
+    oma = c(2, 2, 4, 2),      # Outer margins (for overall title)
+    mgp = c(5, 4, 1),
+    cex.main=4)
+
+for (sig in names(roc.list_26)){
+  plot(roc.list_26[[sig]], 
+       print.thres="best",
+       print.thres.best.method="youden",
+       print.thres.cex=3, 
+       print.thres.pattern=ifelse(roc.list_14[[sig]]$percent, 
+                                  "%.1f (%.1f%%, %.1f%%)", "%.2f (%.2f, %.2f)"),
+       main=sig,
+       xlab="",
+       ylab="")
+  
+  mtext("Specificity", side = 1, line = 4, cex = 3)
+  mtext("Sensitivity", side = 2, line = 5, cex = 3)
+
+#, legacy.axis=TRUE
+  points(0.90, 0.80, pch=19, col="darkviolet", cex=3)  # 80% sens, 90% spec
+  text(0.90, 0.74, "WHO TPP [80%,90%]",pos=4, cex=3,col="darkviolet")
+}
+#dev.off()
+```
+
+### Bar plots
+```{r}
+## X-axis models
+## Y-axis aucs
+## Error bars from bootstrapping? Or Delong's CI
+## Box plot from TBSigPRof uses bootstrapped AUCs, with error bars as bootstrapped CIs
+## Scriba plot is single AUC value and Delong CI
+
+### Get long df, with sigature, timepoint, AUC, lower and upper CI (from Delong's method)
+
+auc_df_0$Timepoint<-'0'
+auc_df_1$Timepoint<-'1'
+auc_df_2$Timepoint<-'2'
+auc_df_9$Timepoint<-'9'
+auc_df_14$Timepoint<-'14'
+auc_df_26$Timepoint<-'26'
+
+auc_all<-rbind(auc_df_0, auc_df_1, auc_df_2, auc_df_9, auc_df_14, auc_df_26)
+
+melted_data <- reshape2::melt(auc_all,
+                              measure.vars=c('Model'),
+                                variable.name = "X",
+                                value.name = "Signatures")
+
+melted_data <- melted_data[order(melted_data$Timepoint), ]
+
+# Color by timepoint
+## Reorder data
+melted_data$Timepoint<- gdata::reorder.factor(
+    melted_data$Timepoint,
+    new.order = c('0','1','2','9','14', '26'))
+col_palette = c(brewer.pal(9,"Greens")[4:9])
+
+# Color by Signature
+melted_data$Signatures<-fct_reorder(melted_data$Signatures, melted_data$auc, 
+                                    .fun=mean, .desc = TRUE)
+col_palette = c(brewer.pal(8,"Dark2")[2:7])
+
+
+### Change colors 
+p<-ggplot(melted_data, aes(x=Timepoint, y=auc,color=Signatures)) + 
+  geom_pointrange(aes(ymin=ci_lower, ymax=ci_upper),
+                  position = position_dodge(width = 0.5) )+
+  labs(title = "AUC for disease recurrence prediction")+
+  scale_y_continuous(name="AUC")+
+  scale_color_manual(
+    values = col_palette,
+    labels=c('Sweeney-3','RISK-16','RISK-6','MAMS-6','Vargas-18','Tabone-27')
+  ) + 
+  labs(color = "Signatures", x="Weeks on treatment")+
+  theme_minimal()+
+  theme(plot.title=element_text(hjust=0.5, size=16), # set to centre
+        axis.text.x = element_text(size=14),
+        axis.title.x= element_text(size=16),
+        axis.text.y = element_text(size=14),
+        axis.title.y= element_text(size=16),
+        legend.text = element_text(size=14),
+        legend.title = element_text(size=16),
+        legend.spacing = unit(4, 'cm'))
+p
+
+ggsave("AUROCs_OG_signatures.png", p, width = 10, height = 5,
+       dpi=300, bg='white')
+```
+
+# Misclassifications 
+## Get sens/spec over time
+```{r}
+models <- list(
+  Sweeney3_Add = "Sweeney_Add_OriginalModel",
+  MAMS6_mean  = "MAMS_6_mean_OriginalModel",
+  RISK6       = "RISKgeo_6_OriginalModel",
+  Zak16       = "Zak_RISK_16_OriginalModel",
+  Tabone      = "Tabone27_OriginalModel",
+  Vargas      = "Vargas_OriginalModel"
+)
+
+make_df <- function(obj, timepoint, models) {
+  bind_rows(lapply(names(models), function(sig) {
+    r <- rocit(score = obj[[models[[sig]]]], class = obj$label_binary)
+    idx <- which.max(r$TPR - r$FPR)
+    data.frame(
+      signature = sig,
+      timepoint = timepoint,
+      TPR = r$TPR[idx],
+      FPR = r$FPR[idx]
+    )
+  }))
+}
+
+all_dfs <- rbind(
+  make_df(roc_1, 1, models),
+  make_df(roc_2, 2, models),
+  make_df(roc_9, 9, models),
+  make_df(roc_14, 14, models),
+  make_df(roc_26, 26, models)
+)
+### add timepoint 0
+models <- list(
+  Sweeney3_Add = "Sweeney_Add_OriginalModel",
+  MAMS6_mean  = "MAMS_6_mean_OriginalModel",
+  RISK6       = "RISKgeo_6_OriginalModel",
+  Zak16       = "Zak_RISK_16_OriginalModel",
+  Vargas      = "Vargas_OriginalModel"
+)
+temp0<-make_df(roc_0, 0, models)
+all_dfs<-rbind(all_dfs,temp0)
+
+all_dfs
+```
+
+
+## Bind and plot
+```{r}
+plte<-wes_palette("AsteroidCity1",type='discrete')
+
+all_dfs$signature<-factor(all_dfs$signature, levels=c("Sweeney3_Add","RISK6",
+                                                      "MAMS6_mean","Vargas",
+                                                      "Tabone","Zak16"))
+
+sig_labs<-c(`Sweeney3_Add`='Sweeney-3',
+            `RISK6`='RISK-6',
+            `MAMS6_mean`='MAMS-6',
+            `Zak16`='RISK-16',
+            `Tabone`='Tabone-27',
+            `Vargas`='Vargas-18'
+            )
+
+plt<-ggplot(all_dfs, aes(x=timepoint)) + #, group=signature, color=signature
+  geom_line(aes(y = TPR, color = "Sensitivity"), size = 0.5) + #, linetype=signature
+  geom_line(aes(y = 1-FPR, color = "Specificity"), size = 0.5) +
+  facet_wrap(~signature, labeller=as_labeller(sig_labs)) +
+  scale_color_manual(values = plte)+
+  labs(title = "Temporal Sensitivity and Specificity per gene signature",
+       color = "Metric",
+       y="Value",
+       x="Weeks on treatment",
+       ) +
+  theme_minimal()
+
+plt
+ggsave('sens_spec_temporal_signature_facet.png',plt, dpi=300,bg='white',
+       width = 6, height = 4)
+
+```
+
+```{r}
+all_dfs <- all_dfs[order(all_dfs$timepoint),]
+
+plot_df <- all_dfs %>%
+  select(signature, timepoint, TPR, FPR) %>%
+  pivot_longer(cols = c(TPR, FPR),
+               names_to = "Metric", values_to = "Value")
+
+#plt<-
+ggplot(plot_df, aes(x = timepoint, y = Value, color = signature)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  facet_wrap(~factor(Metric, c("TPR", "FPR")), scales = "free_x") +
+  labs(
+    x = "Time on Treatment (Weeks)",
+    y = "Value",
+    color = "Model",
+    title = "FPR and TPR over Time (at Youden Threshold)"
+  ) +
+  theme_minimal(base_size = 10)
+
+
+ggsave('031025mm_sens_spec_temporal.png',plt, dpi=300,bg='white',
+       width = 6, height = 4)
+
+```
+
+## Extensive metrics
+### Check which patients
+```{r}
+check<-dplyr::select(roc_26,contains(c("label","misclass")))
+```
+
+### WK26
+#### Get calcs
+##### Sweeney (from publication)
+```{r}
+test <- rocit(roc_26$Sweeney_Add_OriginalModel,roc_26$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+### Add predicted labels
+roc_26<-roc_26%>%
+  mutate(Sweeney_add_prediction = if_else(Sweeney_Add_OriginalModel<threshold, 0,1))
+
+### Get misclassification label
+roc_26<-roc_26%>%
+  mutate(Sweeney_add_misclass = if_else(label_binary == Sweeney_add_prediction, "FALSE","TRUE"))
+
+### Get confusion matrix + metrics
+#### For Sweeney - if a value is predicted ABOVE the negative threshold 
+#### (i.e. less negative), then the class == 1
+xtab<-table(roc_26$Sweeney_add_prediction, roc_26$label_binary)
+acc<-confusionMatrix(xtab)$overall
+metrics<-confusionMatrix(xtab)$byClass
+```
+
+
+##### Zak_16
+```{r}
+test <- rocit(roc_26$Zak_RISK_16_OriginalModel,roc_26$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+
+### Add predicted labels
+#### threshold direction same as other signatures, 
+#### the rocit function is estimating the opposite (gives AUC of 0.287)
+roc_26<-roc_26%>%
+  mutate(Zak_prediction = if_else(Zak_RISK_16_OriginalModel<threshold, 0,1))
+
+
+### Get misclassification label
+roc_26<-roc_26%>%
+  mutate(Zak_misclass = if_else(label_binary == Zak_prediction, "FALSE","TRUE"))
+```
+
+
+##### MAMS_mean
+```{r}
+test <- rocit(roc_26$MAMS_6_mean_OriginalModel,roc_26$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+### Add predicted labels
+roc_26<-roc_26%>%
+  mutate(MAMS_mean_prediction = if_else(MAMS_6_mean_OriginalModel<threshold, 0,1))
+
+
+### Get misclassification label
+roc_26<-roc_26%>%
+  mutate(MAMS_mean_misclass = if_else(label_binary == MAMS_mean_prediction, "FALSE","TRUE"))
+```
+
+##### Risk6
+```{r}
+test <- rocit(roc_26$RISKgeo_6_OriginalModel,roc_26$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+### Add predicted labels
+roc_26<-roc_26%>%
+  mutate(RISK6_prediction = if_else(RISKgeo_6_OriginalModel<threshold, 0,1))
+
+
+### Get misclassification label
+roc_26<-roc_26%>%
+  mutate(RISK6_misclass = if_else(label_binary == RISK6_prediction, "FALSE","TRUE"))
+```
+
+##### Vargas
+```{r}
+test <- rocit(roc_26$Vargas_OriginalModel,roc_26$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+### Add predicted labels
+roc_26<-roc_26%>%
+  mutate(Vargas_prediction = if_else(Vargas_OriginalModel<threshold, 0,1))
+
+
+### Get misclassification label
+roc_26<-roc_26%>%
+  mutate(Vargas_misclass = if_else(label_binary == Vargas_prediction, "FALSE","TRUE"))
+```
+
+##### Tabone
+```{r}
+test <- rocit(roc_26$Tabone27_OriginalModel,roc_26$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+### Add predicted labels
+roc_26<-roc_26%>%
+  mutate(Tabone_prediction = if_else(Tabone27_OriginalModel<threshold, 0,1))
+
+
+### Get misclassification label
+roc_26<-roc_26%>%
+  mutate(Tabone_misclass = if_else(label_binary == Tabone_prediction, "FALSE","TRUE"))
+```
+
+
+#### Metrics tables
+```{r}
+## Sw3
+xtab<-table(roc_26$Sweeney_add_prediction, roc_26$label_binary)
+SW1met<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(SW1=value)
+
+xtab<-table(roc_26$Zak_prediction, roc_26$label_binary)
+R16met<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(R16=value)
+
+xtab<-table(roc_26$MAMS_mean_prediction, roc_26$label_binary)
+MAMSmumet<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(MAMSmu=value)
+
+
+xtab<-table(roc_26$RISK6_prediction, roc_26$label_binary)
+R6met<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(R6=value)
+
+
+xtab<-table(roc_26$Vargas_prediction, roc_26$label_binary)
+Varmet<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(Vargas=value)
+
+
+xtab<-table(roc_26$Tabone_prediction, roc_26$label_binary)
+Tabmet<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(Tabone=value)
+
+
+metrics26<-cbind(SW1met, MAMSmumet$MAMSmu, 
+                 R6met$R6, Varmet$Vargas,Tabmet$Tabone, R16met$R16)
+metrics26$tp<-26
+```
+
+
+### WK 0
+#### Get calcs
+##### Sweeney (from publication)
+```{r}
+test <- rocit(roc_0$Sweeney_Add_OriginalModel,roc_0$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+### Add predicted labels
+roc_0<-roc_0%>%
+  mutate(Sweeney_add_prediction = if_else(Sweeney_Add_OriginalModel<threshold, 0,1))
+
+### Get misclassification label
+roc_0<-roc_0%>%
+  mutate(Sweeney_add_misclass = if_else(label_binary == Sweeney_add_prediction, "FALSE","TRUE"))
+```
+
+##### Zak_16
+```{r}
+test <- rocit(roc_0$Zak_RISK_16_OriginalModel,roc_0$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+
+### Add predicted labels
+#### threshold direction same as other signatures, 
+#### the rocit function is estimating the opposite (gives AUC of 0.375)
+roc_0<-roc_0%>%
+  mutate(Zak_prediction = if_else(Zak_RISK_16_OriginalModel<threshold, 0,1))
+
+
+### Get misclassification label
+roc_0<-roc_0%>%
+  mutate(Zak_misclass = if_else(label_binary == Zak_prediction, "FALSE","TRUE"))
+```
+
+
+##### MAMS_mean
+```{r}
+test <- rocit(roc_0$MAMS_6_mean_OriginalModel,roc_0$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+### Add predicted labels
+roc_0<-roc_0%>%
+  mutate(MAMS_mean_prediction = if_else(MAMS_6_mean_OriginalModel<threshold, 0,1))
+
+
+### Get misclassification label
+roc_0<-roc_0%>%
+  mutate(MAMS_mean_misclass = if_else(label_binary == MAMS_mean_prediction, "FALSE","TRUE"))
+```
+
+##### Risk6
+```{r}
+test <- rocit(roc_0$RISKgeo_6_OriginalModel,roc_0$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+### Add predicted labels
+roc_0<-roc_0%>%
+  mutate(RISK6_prediction = if_else(RISKgeo_6_OriginalModel<threshold, 0,1))
+
+
+### Get misclassification label
+roc_0<-roc_0%>%
+  mutate(RISK6_misclass = if_else(label_binary == RISK6_prediction, "FALSE","TRUE"))
+```
+
+##### Vargas
+```{r}
+test <- rocit(roc_0$Vargas_OriginalModel,roc_0$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+### Add predicted labels
+roc_0<-roc_0%>%
+  mutate(Vargas_prediction = if_else(Vargas_OriginalModel<threshold, 0,1))
+
+
+### Get misclassification label
+roc_0<-roc_0%>%
+  mutate(Vargas_misclass = if_else(label_binary == Vargas_prediction, "FALSE","TRUE"))
+```
+
+
+#### Metrics table
+```{r}
+xtab<-table(roc_0$Sweeney_add_prediction, roc_0$label_binary)
+SW1met<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(SW1=value)
+
+xtab<-table(roc_0$Zak_prediction, roc_0$label_binary)
+R16met<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(R16=value)
+
+xtab<-table(roc_0$MAMS_mean_prediction, roc_0$label_binary)
+MAMSmumet<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(MAMSmu=value)
+
+
+xtab<-table(roc_0$RISK6_prediction, roc_0$label_binary)
+R6met<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(R6=value)
+
+
+xtab<-table(roc_0$Vargas_prediction, roc_0$label_binary)
+Varmet<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(Vargas=value)
+
+
+
+metrics0<-cbind(SW1met,  MAMSmumet$MAMSmu, 
+                 R6met$R6, Varmet$Vargas, R16met$R16)
+metrics0$`Tabmet$Tabone`<-NA
+metrics0$tp<-0
+```
+
+
+### WK 1
+#### Get calcs
+##### Sweeney (from publication)
+```{r}
+test <- rocit(roc_1$Sweeney_Add_OriginalModel,roc_1$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+### Add predicted labels
+roc_1<-roc_1%>%
+  mutate(Sweeney_add_prediction = if_else(Sweeney_Add_OriginalModel<threshold, 0,1))
+
+### Get misclassification label
+roc_1<-roc_1%>%
+  mutate(Sweeney_add_misclass = if_else(label_binary == Sweeney_add_prediction, "FALSE","TRUE"))
+```
+
+
+##### Zak_16
+```{r}
+test <- rocit(roc_1$Zak_RISK_16_OriginalModel,roc_1$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+
+### Add predicted labels
+#### threshold direction same as other signatures, 
+#### the rocit function is estimating the opposite (gives AUC of 0.375)
+roc_1<-roc_1%>%
+  mutate(Zak_prediction = if_else(Zak_RISK_16_OriginalModel<threshold, 0,1))
+
+
+### Get misclassification label
+roc_1<-roc_1%>%
+  mutate(Zak_misclass = if_else(label_binary == Zak_prediction, "FALSE","TRUE"))
+```
+
+
+##### MAMS_mean
+```{r}
+test <- rocit(roc_1$MAMS_6_mean_OriginalModel,roc_1$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+### Add predicted labels
+roc_1<-roc_1%>%
+  mutate(MAMS_mean_prediction = if_else(MAMS_6_mean_OriginalModel<threshold, 0,1))
+
+
+### Get misclassification label
+roc_1<-roc_1%>%
+  mutate(MAMS_mean_misclass = if_else(label_binary == MAMS_mean_prediction, "FALSE","TRUE"))
+```
+
+##### Risk6
+```{r}
+test <- rocit(roc_1$RISKgeo_6_OriginalModel,roc_1$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+### Add predicted labels
+roc_1<-roc_1%>%
+  mutate(RISK6_prediction = if_else(RISKgeo_6_OriginalModel<threshold, 0,1))
+
+
+### Get misclassification label
+roc_1<-roc_1%>%
+  mutate(RISK6_misclass = if_else(label_binary == RISK6_prediction, "FALSE","TRUE"))
+```
+
+##### Vargas
+```{r}
+test <- rocit(roc_1$Vargas_OriginalModel,roc_1$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+### Add predicted labels
+roc_1<-roc_1%>%
+  mutate(Vargas_prediction = if_else(Vargas_OriginalModel<threshold, 0,1))
+
+
+### Get misclassification label
+roc_1<-roc_1%>%
+  mutate(Vargas_misclass = if_else(label_binary == Vargas_prediction, "FALSE","TRUE"))
+```
+
+##### Tabone
+```{r}
+test <- rocit(roc_1$Tabone27_OriginalModel,roc_1$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+### Add predicted labels
+roc_1<-roc_1%>%
+  mutate(Tabone_prediction = if_else(Tabone27_OriginalModel<threshold, 0,1))
+
+
+### Get misclassification label
+roc_1<-roc_1%>%
+  mutate(Tabone_misclass = if_else(label_binary == Tabone_prediction, "FALSE","TRUE"))
+```
+
+
+#### Metrics table
+```{r}
+xtab<-table(roc_1$Sweeney_add_prediction, roc_1$label_binary)
+SW1met<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(SW1=value)
+
+xtab<-table(roc_1$Zak_prediction, roc_1$label_binary)
+R16met<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(R16=value)
+
+xtab<-table(roc_1$MAMS_mean_prediction, roc_1$label_binary)
+MAMSmumet<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(MAMSmu=value)
+
+
+xtab<-table(roc_1$RISK6_prediction, roc_1$label_binary)
+R6met<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(R6=value)
+
+
+xtab<-table(roc_1$Vargas_prediction, roc_1$label_binary)
+Varmet<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(Vargas=value)
+
+xtab<-table(roc_1$Tabone_prediction, roc_1$label_binary)
+Tabmet<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(Tabone=value)
+
+metrics1<-cbind(SW1met,  MAMSmumet$MAMSmu, 
+                 R6met$R6, Varmet$Vargas, R16met$R16, Tabmet$Tabone)
+metrics1$tp<-1
+```
+
+### WK 2
+#### Get calcs
+##### Sweeney (from publication)
+```{r}
+test <- rocit(roc_2$Sweeney_Add_OriginalModel,roc_2$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+### Add predicted labels
+roc_2<-roc_2%>%
+  mutate(Sweeney_add_prediction = if_else(Sweeney_Add_OriginalModel<threshold, 0,1))
+
+### Get misclassification label
+roc_2<-roc_2%>%
+  mutate(Sweeney_add_misclass = if_else(label_binary == Sweeney_add_prediction, "FALSE","TRUE"))
+```
+
+
+##### Zak_16
+```{r}
+test <- rocit(roc_2$Zak_RISK_16_OriginalModel,roc_2$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+
+### Add predicted labels
+#### threshold direction same as other signatures, 
+#### the rocit function is estimating the opposite (gives AUC of 0.375)
+roc_2<-roc_2%>%
+  mutate(Zak_prediction = if_else(Zak_RISK_16_OriginalModel<threshold, 0,1))
+
+
+### Get misclassification label
+roc_2<-roc_2%>%
+  mutate(Zak_misclass = if_else(label_binary == Zak_prediction, "FALSE","TRUE"))
+```
+
+
+##### MAMS_mean
+```{r}
+test <- rocit(roc_2$MAMS_6_mean_OriginalModel,roc_2$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+### Add predicted labels
+roc_2<-roc_2%>%
+  mutate(MAMS_mean_prediction = if_else(MAMS_6_mean_OriginalModel<threshold, 0,1))
+
+
+### Get misclassification label
+roc_2<-roc_2%>%
+  mutate(MAMS_mean_misclass = if_else(label_binary == MAMS_mean_prediction, "FALSE","TRUE"))
+```
+
+##### Risk6
+```{r}
+test <- rocit(roc_2$RISKgeo_6_OriginalModel,roc_2$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+### Add predicted labels
+roc_2<-roc_2%>%
+  mutate(RISK6_prediction = if_else(RISKgeo_6_OriginalModel<threshold, 0,1))
+
+
+### Get misclassification label
+roc_2<-roc_2%>%
+  mutate(RISK6_misclass = if_else(label_binary == RISK6_prediction, "FALSE","TRUE"))
+```
+
+##### Vargas
+```{r}
+test <- rocit(roc_2$Vargas_OriginalModel,roc_2$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+### Add predicted labels
+roc_2<-roc_2%>%
+  mutate(Vargas_prediction = if_else(Vargas_OriginalModel<threshold, 0,1))
+
+
+### Get misclassification label
+roc_2<-roc_2%>%
+  mutate(Vargas_misclass = if_else(label_binary == Vargas_prediction, "FALSE","TRUE"))
+```
+
+##### Tabone
+```{r}
+test <- rocit(roc_2$Tabone27_OriginalModel,roc_2$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+### Add predicted labels
+roc_2<-roc_2%>%
+  mutate(Tabone_prediction = if_else(Tabone27_OriginalModel<threshold, 0,1))
+
+
+### Get misclassification label
+roc_2<-roc_2%>%
+  mutate(Tabone_misclass = if_else(label_binary == Tabone_prediction, "FALSE","TRUE"))
+```
+
+
+
+#### Metrics table
+```{r}
+xtab<-table(roc_2$Sweeney_add_prediction, roc_2$label_binary)
+SW1met<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(SW1=value)
+
+
+xtab<-table(roc_2$Zak_prediction, roc_2$label_binary)
+R16met<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(R16=value)
+
+
+xtab<-table(roc_2$MAMS_mean_prediction, roc_2$label_binary)
+MAMSmumet<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(MAMSmu=value)
+
+
+xtab<-table(roc_2$RISK6_prediction, roc_2$label_binary)
+R6met<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(R6=value)
+
+
+xtab<-table(roc_2$Vargas_prediction, roc_2$label_binary)
+Varmet<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(Vargas=value)
+
+xtab<-table(roc_2$Tabone_prediction, roc_2$label_binary)
+Tabmet<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(Tabone=value)
+
+
+metrics2<-cbind(SW1met,  MAMSmumet$MAMSmu,  
+                 R6met$R6, Varmet$Vargas, R16met$R16, Tabmet$Tabone)
+metrics2$tp<-2
+```
+
+### WK 9
+#### Get calcs
+##### Sweeney (from publication)
+```{r}
+test <- rocit(roc_9$Sweeney_Add_OriginalModel,roc_9$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+### Add predicted labels
+roc_9<-roc_9%>%
+  mutate(Sweeney_add_prediction = if_else(Sweeney_Add_OriginalModel<threshold, 0,1))
+
+### Get misclassification label
+roc_9<-roc_9%>%
+  mutate(Sweeney_add_misclass = if_else(label_binary == Sweeney_add_prediction, "FALSE","TRUE"))
+```
+
+
+##### Zak_16
+```{r}
+test <- rocit(roc_9$Zak_RISK_16_OriginalModel,roc_9$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+
+### Add predicted labels
+#### threshold direction same as other signatures, 
+#### the rocit function is estimating the opposite (gives AUC of 0.287)
+roc_9<-roc_9%>%
+  mutate(Zak_prediction = if_else(Zak_RISK_16_OriginalModel<threshold, 0,1))
+
+
+### Get misclassification label
+roc_9<-roc_9%>%
+  mutate(Zak_misclass = if_else(label_binary == Zak_prediction, "FALSE","TRUE"))
+```
+
+
+##### MAMS_mean
+```{r}
+test <- rocit(roc_9$MAMS_6_mean_OriginalModel,roc_9$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+### Add predicted labels
+roc_9<-roc_9%>%
+  mutate(MAMS_mean_prediction = if_else(MAMS_6_mean_OriginalModel<threshold, 0,1))
+
+
+### Get misclassification label
+roc_9<-roc_9%>%
+  mutate(MAMS_mean_misclass = if_else(label_binary == MAMS_mean_prediction, "FALSE","TRUE"))
+```
+
+##### Risk6
+```{r}
+test <- rocit(roc_9$RISKgeo_6_OriginalModel,roc_9$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+### Add predicted labels
+roc_9<-roc_9%>%
+  mutate(RISK6_prediction = if_else(RISKgeo_6_OriginalModel<threshold, 0,1))
+
+
+### Get misclassification label
+roc_9<-roc_9%>%
+  mutate(RISK6_misclass = if_else(label_binary == RISK6_prediction, "FALSE","TRUE"))
+```
+
+##### Vargas
+```{r}
+test <- rocit(roc_9$Vargas_OriginalModel,roc_9$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+### Add predicted labels
+roc_9<-roc_9%>%
+  mutate(Vargas_prediction = if_else(Vargas_OriginalModel<threshold, 0,1))
+
+
+### Get misclassification label
+roc_9<-roc_9%>%
+  mutate(Vargas_misclass = if_else(label_binary == Vargas_prediction, "FALSE","TRUE"))
+```
+
+##### Tabone
+```{r}
+test <- rocit(roc_9$Tabone27_OriginalModel,roc_9$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+### Add predicted labels
+roc_9<-roc_9%>%
+  mutate(Tabone_prediction = if_else(Tabone27_OriginalModel<threshold, 0,1))
+
+
+### Get misclassification label
+roc_9<-roc_9%>%
+  mutate(Tabone_misclass = if_else(label_binary == Tabone_prediction, "FALSE","TRUE"))
+```
+
+
+#### Metrics tables
+```{r}
+## Sw3
+xtab<-table(roc_9$Sweeney_add_prediction, roc_9$label_binary)
+SW1met<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(SW1=value)
+
+
+xtab<-table(roc_9$Zak_prediction, roc_9$label_binary)
+R16met<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(R16=value)
+
+
+xtab<-table(roc_9$MAMS_mean_prediction, roc_9$label_binary)
+MAMSmumet<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(MAMSmu=value)
+
+
+xtab<-table(roc_9$RISK6_prediction, roc_9$label_binary)
+R6met<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(R6=value)
+
+
+xtab<-table(roc_9$Vargas_prediction, roc_9$label_binary)
+Varmet<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(Vargas=value)
+
+
+xtab<-table(roc_9$Tabone_prediction, roc_9$label_binary)
+Tabmet<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(Tabone=value)
+
+
+metrics9<-cbind(SW1met,  MAMSmumet$MAMSmu,
+                 R6met$R6, Varmet$Vargas,Tabmet$Tabone, R16met$R16)
+metrics9$tp<-9
+```
+
+
+### WK14
+#### Get calcs
+##### Sweeney (from publication)
+```{r}
+test <- rocit(roc_14$Sweeney_Add_OriginalModel,roc_14$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+### Add predicted labels
+roc_14<-roc_14%>%
+  mutate(Sweeney_add_prediction = if_else(Sweeney_Add_OriginalModel<threshold, 0,1))
+
+### Get misclassification label
+roc_14<-roc_14%>%
+  mutate(Sweeney_add_misclass = if_else(label_binary == Sweeney_add_prediction, "FALSE","TRUE"))
+```
+
+##### Zak_16
+```{r}
+test <- rocit(roc_14$Zak_RISK_16_OriginalModel,roc_14$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+
+### Add predicted labels
+#### threshold direction same as other signatures, 
+#### the rocit function is estimating the opposite (gives AUC of 0.287)
+roc_14<-roc_14%>%
+  mutate(Zak_prediction = if_else(Zak_RISK_16_OriginalModel<threshold, 0,1))
+
+
+### Get misclassification label
+roc_14<-roc_14%>%
+  mutate(Zak_misclass = if_else(label_binary == Zak_prediction, "FALSE","TRUE"))
+```
+
+##### MAMS_mean
+```{r}
+test <- rocit(roc_14$MAMS_6_mean_OriginalModel,roc_14$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+### Add predicted labels
+roc_14<-roc_14%>%
+  mutate(MAMS_mean_prediction = if_else(MAMS_6_mean_OriginalModel<threshold, 0,1))
+
+
+### Get misclassification label
+roc_14<-roc_14%>%
+  mutate(MAMS_mean_misclass = if_else(label_binary == MAMS_mean_prediction, "FALSE","TRUE"))
+```
+
+##### Risk6
+```{r}
+test <- rocit(roc_14$RISKgeo_6_OriginalModel,roc_14$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+### Add predicted labels
+roc_14<-roc_14%>%
+  mutate(RISK6_prediction = if_else(RISKgeo_6_OriginalModel<threshold, 0,1))
+
+
+### Get misclassification label
+roc_14<-roc_14%>%
+  mutate(RISK6_misclass = if_else(label_binary == RISK6_prediction, "FALSE","TRUE"))
+```
+
+##### Vargas
+```{r}
+test <- rocit(roc_14$Vargas_OriginalModel,roc_14$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+### Add predicted labels
+roc_14<-roc_14%>%
+  mutate(Vargas_prediction = if_else(Vargas_OriginalModel<threshold, 0,1))
+
+
+### Get misclassification label
+roc_14<-roc_14%>%
+  mutate(Vargas_misclass = if_else(label_binary == Vargas_prediction, "FALSE","TRUE"))
+```
+
+##### Tabone
+```{r}
+test <- rocit(roc_14$Tabone27_OriginalModel,roc_14$label_binary)
+threshold<-test$Cutoff[[which.max(test$TPR - test$FPR)]]
+### Add predicted labels
+roc_14<-roc_14%>%
+  mutate(Tabone_prediction = if_else(Tabone27_OriginalModel<threshold, 0,1))
+
+
+### Get misclassification label
+roc_14<-roc_14%>%
+  mutate(Tabone_misclass = if_else(label_binary == Tabone_prediction, "FALSE","TRUE"))
+```
+
+
+#### Metrics tables
+```{r}
+## Sw3
+xtab<-table(roc_14$Sweeney_add_prediction, roc_14$label_binary)
+SW1met<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(SW1=value)
+
+xtab<-table(roc_14$Zak_prediction, roc_14$label_binary)
+R16met<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(R16=value)
+
+xtab<-table(roc_14$MAMS_mean_prediction, roc_14$label_binary)
+MAMSmumet<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(MAMSmu=value)
+
+
+xtab<-table(roc_14$RISK6_prediction, roc_14$label_binary)
+R6met<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(R6=value)
+
+
+xtab<-table(roc_14$Vargas_prediction, roc_14$label_binary)
+Varmet<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(Vargas=value)
+
+
+xtab<-table(roc_14$Tabone_prediction, roc_14$label_binary)
+Tabmet<-rbind(enframe(confusionMatrix(xtab)$overall),
+              enframe(confusionMatrix(xtab)$byClass))%>%
+  dplyr::rename(Tabone=value)
+
+
+metrics14<-cbind(SW1met,  MAMSmumet$MAMSmu,
+                 R6met$R6, Varmet$Vargas,Tabmet$Tabone, R16met$R16)
+metrics14$tp<-14
+```
+
+## Metrics plots
+```{r}
+### Merge and format
+metrics_tot<-rbind(metrics0,metrics1,metrics2,metrics9,metrics14,metrics26)
+plt_df<-as.data.frame(t(reshape(metrics_tot, idvar="name", timevar="tp", 
+                                direction="wide")))
+colnames(plt_df)<- plt_df[1,]
+plt_df<-plt_df[-1,]
+plt_df$Week <-rep(c(0,1,2,9,14,26),each=6)
+plt_df<-plt_df%>%
+  mutate_if(is.character,as.numeric)
+plt_df$sigs<-rep(c("Sweeney-3 [Add]","MAMS6 mean", 
+                   "RISK6","Vargas","RISK16","Tabone-27"), times=6)
+
+
+plt<-ggplot(plt_df, aes(x=Week, group=sigs, colour = sigs)) + 
+  geom_line(aes(y=Accuracy),size = 0.5) +
+#  ylim()+
+  labs(title = "Accuracy",
+       color = "Metric",
+       y="Value",
+       x="Weeks on treatment",
+       ) +
+  theme_minimal()
+plt
+```
+#### Get table
+```{r}
+tbl_df<-plt_df[c("Accuracy","Pos Pred Value","Neg Pred Value","Precision",
+                 "Recall","F1","Week", "sigs")]
+tbl_df<-tbl_df%>%
+  group_by(sigs)
+
+metrics_tab<-gt(tbl_df)%>%
+  fmt_number(columns=c("Accuracy","Pos Pred Value","Neg Pred Value","Precision",
+                 "Recall","F1"),decimals = 2)%>%
+  gtsave(filename='251210mm_Classification_metrics.docx') ## or .html/.png
+```
+
+
+
