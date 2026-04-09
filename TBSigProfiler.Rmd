@@ -29,11 +29,6 @@ lapply(pkgs, require, character.only = TRUE)
 # Original signature functions
 ```{r}
 ### MAMS
-MAMS_6_med <- function(counts) {
-        genes = c("AIM2", "FCGR1BP", "CD274", "GBP1", "SMARCD3", "FLVCR2")
-    return(colMedians(counts[genes, ]))
-}
-
 MAMS_6_mean <- function(counts) {
         genes = c("AIM2", "FCGR1BP", "CD274", "GBP1", "SMARCD3", "FLVCR2")
     return(colMeans(counts[genes, ]))
@@ -880,8 +875,8 @@ ggsave("AUROCs_GSEA_signatures.png", p, width = 9, height = 4,
 ```{r}
 # no normalization genes
 TBSignatureProfiler:::addTBsignature(c("AIM2", "FCGR1BP", "CD274", "GBP1", "SMARCD3", "FLVCR2"),
-      authname='MAMS_med',
-      signame_common = "MAMS6_med",
+      authname='MAMS',
+      signame_common = "MAMS6",
       sigtype='response',
       tissuetype='whole blood',
       saveobjs = TRUE,
@@ -1067,8 +1062,6 @@ TBsignaturesSplit$MAMS6_med <- list(
 w0_mtx<-SummarizedExperiment::assay(w0_norm,'counts')
 
 #MAMS
-MAMS_med<-MAMS_6_med(w0_mtx)
-names(MAMS_med)<-NULL
 MAMS_means<-MAMS_6_mean(w0_mtx)
 names(MAMS_means)<-NULL
 
@@ -1086,7 +1079,6 @@ names(Sweeney_sc)<-NULL
 ## Check that res cols and SE subjectIDs order match
 w0_ogmodels@colData@rownames == colnames(w0_mtx)
 # sig values stored:
-w0_ogmodels@colData@listData[["MAMS_6_med_OriginalModel"]]<-MAMS_med
 w0_ogmodels@colData@listData[["MAMS_6_mean_OriginalModel"]]<-MAMS_means
 w0_ogmodels@colData@listData[["RISKgeo_6_OriginalModel"]]<-risk6_geo_scores
 w0_ogmodels@colData@listData[["Sweeney_Add_OriginalModel"]]<-Sweeney_sc
@@ -1098,8 +1090,6 @@ w0_ogmodels@colData@listData[["Sweeney_Add_OriginalModel"]]<-Sweeney_sc
 w26_mtx<-SummarizedExperiment::assay(w26_norm,'counts')
 
 # MAMS
-MAMS_med<-MAMS_6_med(w26_mtx)
-names(MAMS_med)<-NULL
 MAMS_means<-MAMS_6_mean(w26_mtx)
 names(MAMS_means)<-NULL
 
@@ -1114,7 +1104,6 @@ names(Sweeney_sc)<-NULL
 ## Check that res cols and SE subjectIDs order match
 w26_ogmodels@colData@rownames == colnames(w26_mtx)
 # sig values stored:
-w26_ogmodels@colData@listData[["MAMS_6_med_OriginalModel"]]<-MAMS_med
 w26_ogmodels@colData@listData[["MAMS_6_mean_OriginalModel"]]<-MAMS_means
 w26_ogmodels@colData@listData[["RISKgeo_6_OriginalModel"]]<-risk6_geo_scores
 w26_ogmodels@colData@listData[["Sweeney_Add_OriginalModel"]]<-Sweeney_sc
@@ -1127,8 +1116,6 @@ w26_ogmodels@colData@listData[["Sweeney_Add_OriginalModel"]]<-Sweeney_sc
 w1_mtx<-SummarizedExperiment::assay(w1_norm,'counts')
 
 # MAMS
-MAMS_med<-MAMS_6_med(w1_mtx)
-names(MAMS_med)<-NULL
 MAMS_means<-MAMS_6_mean(w1_mtx)
 names(MAMS_means)<-NULL
 
@@ -1143,7 +1130,6 @@ names(Sweeney_sc)<-NULL
 ## Check that res cols and SE subjectIDs order match
 w1_ogmodels@colData@rownames == colnames(w1_mtx)
 # sig values stored:
-w1_ogmodels@colData@listData[["MAMS_6_med_OriginalModel"]]<-MAMS_med
 w1_ogmodels@colData@listData[["MAMS_6_mean_OriginalModel"]]<-MAMS_means
 w1_ogmodels@colData@listData[["RISKgeo_6_OriginalModel"]]<-risk6_geo_scores
 w1_ogmodels@colData@listData[["Sweeney_Add_OriginalModel"]]<-Sweeney_sc
@@ -1155,8 +1141,6 @@ w1_ogmodels@colData@listData[["Sweeney_Add_OriginalModel"]]<-Sweeney_sc
 w2_mtx<-SummarizedExperiment::assay(w2_norm,'counts')
 
 # MAMS
-MAMS_med<-MAMS_6_med(w2_mtx)
-names(MAMS_med)<-NULL
 MAMS_means<-MAMS_6_mean(w2_mtx)
 names(MAMS_means)<-NULL
 
@@ -1171,7 +1155,6 @@ names(Sweeney_sc)<-NULL
 ## Check that res cols and SE subjectIDs order match
 w2_ogmodels@colData@rownames == colnames(w2_mtx)
 # sig values stored:
-w2_ogmodels@colData@listData[["MAMS_6_med_OriginalModel"]]<-MAMS_med
 w2_ogmodels@colData@listData[["MAMS_6_mean_OriginalModel"]]<-MAMS_means
 w2_ogmodels@colData@listData[["RISKgeo_6_OriginalModel"]]<-risk6_geo_scores
 w2_ogmodels@colData@listData[["Sweeney_Add_OriginalModel"]]<-Sweeney_sc
@@ -1183,8 +1166,6 @@ w2_ogmodels@colData@listData[["Sweeney_Add_OriginalModel"]]<-Sweeney_sc
 w9_mtx<-SummarizedExperiment::assay(w9_norm,'counts')
 
 # MAMS
-MAMS_med<-MAMS_6_med(w9_mtx)
-names(MAMS_med)<-NULL
 MAMS_means<-MAMS_6_mean(w9_mtx)
 names(MAMS_means)<-NULL
 
@@ -1199,7 +1180,6 @@ names(Sweeney_sc)<-NULL
 ## Check that res cols and SE subjectIDs order match
 w9_ogmodels@colData@rownames == colnames(w9_mtx)
 # sig values stored:
-w9_ogmodels@colData@listData[["MAMS_6_med_OriginalModel"]]<-MAMS_med
 w9_ogmodels@colData@listData[["MAMS_6_mean_OriginalModel"]]<-MAMS_means
 w9_ogmodels@colData@listData[["RISKgeo_6_OriginalModel"]]<-risk6_geo_scores
 w9_ogmodels@colData@listData[["Sweeney_Add_OriginalModel"]]<-Sweeney_sc
@@ -1211,8 +1191,6 @@ w9_ogmodels@colData@listData[["Sweeney_Add_OriginalModel"]]<-Sweeney_sc
 w14_mtx<-SummarizedExperiment::assay(w14_norm,'counts')
 
 # MAMS
-MAMS_med<-MAMS_6_med(w14_mtx)
-names(MAMS_med)<-NULL
 MAMS_means<-MAMS_6_mean(w14_mtx)
 names(MAMS_means)<-NULL
 
@@ -1227,7 +1205,6 @@ names(Sweeney_sc)<-NULL
 ## Check that res cols and SE subjectIDs order match
 w14_ogmodels@colData@rownames == colnames(w14_mtx)
 # sig values stored:
-w14_ogmodels@colData@listData[["MAMS_6_med_OriginalModel"]]<-MAMS_med
 w14_ogmodels@colData@listData[["MAMS_6_mean_OriginalModel"]]<-MAMS_means
 w14_ogmodels@colData@listData[["RISKgeo_6_OriginalModel"]]<-risk6_geo_scores
 w14_ogmodels@colData@listData[["Sweeney_Add_OriginalModel"]]<-Sweeney_sc
