@@ -1,0 +1,442 @@
+---
+title: "250429mm_linear_mixed_models"
+output: html_document
+date: "2025-04-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Import
+```{r}
+pkgs <- c("cAIC4", "carData", "effects", "ggplot2", "lattice","lme4",
+          "lmerTest","Matrix", "mlmRev", "nlme","performance", "emmeans",
+          "tidyverse","varTestnlme","sjPlot", "gridExtra", "JLutils")
+
+lapply(pkgs, require, character.only = TRUE)
+```
+
+# Read in
+### recur/control
+```{r}
+dfCC<-read_csv('.../case_control.csv')
+```
+
+### Whole cohort
+```{r}
+dfWC<-read_csv('.../whole_cohort.csv')
+```
+
+# Format
+```{r}
+### Prep dfs
+### add outcome labels
+unfav<-c('AU178L','AU208J','BA112U','BA118J','BA170X','KM519H','KM547Q',
+         'UC115R','UC205E','UC160K','UC109B') #'BA118J'~ 'Treatment failure',
+recur<-c('AU178L','BA112U','BA170X','KM519H','KM547Q','UC115R','UC160K','UC205E')
+control<-c('AU213R','BA151Y','BA120W','KM523J','KM524Q','UC174A','UC113C','UC116X') 
+
+
+dfWC<-dfWC%>%
+  mutate(label=case_when(scrno%in%recur~'recurrence',
+                         scrno%in%control~'control',
+                         TRUE~'whole_cohort'),
+         outcome_binary=case_when(scrno%in%recur~'recurrence',
+                                  TRUE~'not_recurrence'),
+         visit_c = scale(visit_num, scale=T),
+         age_c = scale(age, scale=T))%>%
+  filter(scrno!='BA118J')%>%
+  rename(creatinine = `Creatinine_umol/L`,
+         MCHC = `MCHC_g/dL`,
+         neutrophils_pct = `Neutrophils_%`,
+         neutrophils_abs = `neutrophils_abs_merged_x10E9/l`)%>%
+  group_by(scrno) %>%
+  fill(age, .direction = "downup") %>%
+  fill(sex, .direction = "downup") %>%
+  fill(age_c, .direction = "downup") %>%
+  dplyr::ungroup()
+
+dfCC<-dfCC%>%
+  mutate(label=case_when(scrno%in%recur~'recurrence',
+                         scrno%in%control~'control',
+                         TRUE~'whole_cohort'),
+         outcome_binary=case_when(scrno%in%recur~'recurrence',
+                                  TRUE~'not_recurrence'),
+         visit_c = scale(visit_num, scale=T),
+         age_c = scale(age, scale=T)) %>%
+  filter(scrno!='BA118J')%>%
+  rename(creatinine = `Creatinine_umol/L`,
+         MCHC = `MCHC_g/dL`,
+         neutrophils_pct = `Neutrophils_%`,
+         neutrophils_abs = `neutrophils_abs_merged_x10E9/l`)%>%
+  group_by(scrno) %>%
+  fill(age, .direction = "downup") %>%
+  fill(sex, .direction = "downup") %>%
+  fill(age_c, .direction = "downup") %>%
+  dplyr::ungroup()
+
+```
+
+
+# Models
+## Loop
+### Case-control
+```{r}
+covs<- c("vs_sys","vs_dia","vs_hr","bmi" ,"creatinine","MCHC",
+          "neutrophils_pct", "neutrophils_abs", "MCV_fL","ML_ratio",  
+           "ttp_log","ML_ratio","NL_ratio","NM_ratio","EN_ratio",
+         "EB_ratio","GL_ratio","LP_ratio")
+
+pvals<- numeric(length(covs))
+names(pvals)<-covs
+
+for (var in covs) {
+
+  data<-dfCC[!is.na(dfCC[[var]]) & !is.infinite(dfCC[[var]]),]
+  
+  null_model<-reformulate(c("visit_num + outcome_binary + sex + age_c + (1|scrno)"),
+                          var)
+  alt_model<-reformulate(c("visit_num:outcome_binary + visit_num + sex + age_c + 
+                           outcome_binary + (1|scrno)"), var)
+  
+  model_0<-lmer(null_model, data=data, REML=FALSE)
+  model_1<-lmer(alt_model, data=data, REML=FALSE)
+  
+  if (isSingular(model_0)) warning("Singular fit in model_0 for:", var)
+  if (isSingular(model_1)) warning("Singular fit in model_1 for:", var)
+  
+  comparison<-anova(model_0, model_1)
+  pvals[var]<-comparison$`Pr(>Chisq)`[2]
+}
+```
+
+### Whole cohort
+```{r}
+pvals2<- numeric(length(covs))
+names(pvals2)<-covs
+
+for (var in covs) {
+
+  data<-dfWC[!is.na(dfWC[[var]]) & !is.infinite(dfWC[[var]]),]
+  
+  null_model<-reformulate(c("visit_num + outcome_binary + sex + age_c + (1|scrno)"),
+                          var)
+  alt_model<-reformulate(c("visit_num:outcome_binary + visit_num + sex + age_c + 
+                           outcome_binary + (1|scrno)"), var)
+  
+  model_0<-lmer(null_model, data=data, REML=FALSE)
+  model_1<-lmer(alt_model, data=data, REML=FALSE)
+  
+  if (isSingular(model_0)) warning("Singular fit in model_0 for:", var)
+  if (isSingular(model_1)) warning("Singular fit in model_1 for:", var)
+  
+  comparison<-anova(model_0, model_1)
+  pvals2[var] <-comparison$`Pr(>Chisq)`[2]
+}
+
+```
+
+### MTC correction (BH correction)
+```{r}
+pvals_adj<-p.adjust(pvalTot, method="BH")
+
+results<-data.frame(
+  covariate=names(pvalTot), 
+  pval=pvalTot,
+  padj=pvals_adj
+)
+results<-results[order(results$padj, decreasing=FALSE),]
+results
+```
+
+
+## Check models for effect size
+##### BMI 
+```{r}
+bmi_alt <- lmer(bmi ~ visit_num*label + (1|scrno), data = dfCC, REML = FALSE)#sex+age_c+
+bmi_altWC <- lmer(bmi ~ visit_num*outcome_binary + (1|scrno), data = dfWC, REML = FALSE)#sex+age_c+
+#summary(bmi_altWC)
+```
+
+##### HR
+```{r}
+hr_alt <- lmer(vs_hr ~ visit_num*label + (1|scrno), data = dfCC, REML = FALSE)#sex+age_c+
+hr_altWC <- lmer(vs_hr ~ visit_num*outcome_binary + (1|scrno), data = dfWC, REML = FALSE)#sex+age_c+
+#summary(hr_altWC)
+```
+
+##### ML ratio
+```{r}
+MLR_alt<-lmer(ML_ratio~visit_num*label + (1|scrno), data=dfCC, REML=FALSE) #sex+age_c+
+MLR_altWC<-lmer(ML_ratio~visit_num*outcome_binary + (1|scrno), data=dfWC, REML=FALSE)#sex+age_c+
+#summary(MLR_altWC)
+```
+
+
+##### LP ratio (WC only)
+```{r}
+LPR_altWC<-lmer(LP_ratio~visit_num*outcome_binary + (1|scrno), data=dfWC, REML=FALSE)#sex+age_c+
+#summary(LPR_altWC)
+```
+
+
+#### MTC for individual p-values from models
+```{r}
+models<-list('bmi_alt','bmi_altWC','hr_alt','hr_altWC','MLR_alt','MLR_altWC','LPR_altWC')
+mod_pvals<-models |> ## observe the quotes
+  map_dfr( ~ list(
+            model = .x,
+            coeff = lmerTest:::get_coefmat(get(.x)) |>
+              as.data.frame() |>
+              rownames_to_column())) |> 
+  as_tibble() |>
+  unnest_wider(coeff)
+
+mod_pvals<-mod_pvals|>
+  group_by(model) |>
+  slice(n())
+
+mod_pvals$p_adj<-p.adjust(mod_pvals$`Pr(>|t|)`, method="BH")
+mod_pvals
+```
+
+
+### Interaction plots
+```{r, fig.height=9, fig.width=7}
+p_bmi<-sjPlot::plot_model(bmi_alt, type="int",
+                          title="BMI slopes in case-control")+
+  scale_color_manual(labels=c('Sustained cure', 'Recurrence'),
+                     values=c("darkgrey","#377EB8"))+
+  scale_fill_manual(labels=c('Sustained cure', 'Recurrence'),
+                    values=c("darkgrey","#377EB8"))+
+  labs(x='Treatment week',y=bquote('BMI'~(kg/m^2)), colour= "Outcome group")+
+  theme_classic()
+
+p_hr<-sjPlot::plot_model(hr_alt, type="int", title="Heart rate slopes in case-control")+
+  scale_color_manual(labels=c('Sustained cure', 'Recurrence'),
+                     values=c("darkgrey","#377EB8"))+
+  scale_fill_manual(labels=c('Sustained cure', 'Recurrence'),
+                    values=c("darkgrey","#377EB8"))+
+  labs(x='Treatment week',y='Heart rate (bpm)', colour= "Outcome group")+
+  theme_classic()+
+  geom_text(data=text, aes(x =.1, y = 22.5, label = text), parse=T,
+  inherit.aes = FALSE, show.legend = FALSE,
+  hjust   = -0.1,
+  vjust   = -1, size=5
+)
+
+p_ML<-sjPlot::plot_model(MLR_alt, type="int", title="ML ratio slopes in case-control")+
+  scale_color_manual(labels=c('Sustained cure', 'Recurrence'),
+                     values=c("darkgrey","#377EB8"))+
+  scale_fill_manual(labels=c('Sustained cure', 'Recurrence'),
+                    values=c("darkgrey","#377EB8"))+
+  labs(x='Treatment week',y='Monocyte:Lymphocyte ratio', colour= "Outcome group")+ 
+  theme_classic()
+
+p_MLWC<-sjPlot::plot_model(MLR_altWC, type="int", title="ML ratio slopes in all patients")+
+  scale_color_manual(labels=c('Sustained cure', 'Recurrence'),
+                     values=c("darkgrey","#377EB8"))+
+  scale_fill_manual(labels=c('Sustained cure', 'Recurrence'),
+                    values=c("darkgrey","#377EB8"))+
+  labs(x='Treatment week',y='', colour= "Outcome group")+ 
+  theme_classic()
+
+p_LPR<-sjPlot::plot_model(LPR_altWC, type="int", title="LP ratio slopes in all patients")+
+  scale_color_manual(labels=c('Sustained cure', 'Recurrence'),
+                     values=c("darkgrey","#377EB8"))+
+  scale_fill_manual(labels=c('Sustained cure', 'Recurrence'),
+                    values=c("darkgrey","#377EB8"))+
+  labs(x='Treatment week',y=bquote('LP ratio'), colour= "Outcome group")+
+  theme_classic()
+
+
+plot_all<-gridExtra::grid.arrange(p_bmi,p_LPR,p_hr,p_MLWC,p_ML, ncol=2, nrow=3)
+plot_CC<-gridExtra::grid.arrange(p_bmi, p_hr, p_ML, nrow=3)
+plot_WC<-gridExtra::grid.arrange(p_LPR, p_MLWC,nrow=2)
+```
+
+```{r}
+summary(LPR_altWC)
+```
+
+
+#### Interaction plots w/ effect sizes
+```{r}
+text<-data.frame(
+  text = "paste('P-value: 3.82x10'^{-4}*';Test stat: -3.597')" 
+)
+p_bmi<-sjPlot::plot_model(bmi_alt, type="int",
+                          title="BMI slopes in case-control")+
+  scale_color_manual(labels=c('Sustained cure', 'Recurrence'),
+                     values=c("darkgrey","#377EB8"))+
+  scale_fill_manual(labels=c('Sustained cure', 'Recurrence'),
+                    values=c("darkgrey","#377EB8"))+
+  labs(x='Treatment week',y=bquote('BMI'~(kg/m^2)), colour= "Outcome group")+
+  theme_classic()+
+  geom_text(data=text, aes(x =.1, y = 22, label = text), parse=T,
+  inherit.aes = FALSE, show.legend = FALSE,
+  hjust   = -0.1,
+  vjust   = -1, size=4.2
+  )+
+  theme(legend.position = "none",axis.text=element_text(size=12),
+        axis.title=element_text(size=15),
+        plot.title = element_text(size=16))
+
+text<-data.frame(
+  text = "paste('P-value: 1.75x10'^{-3}*'; Test stat: -3.131')" 
+)
+p_bmiWC<-sjPlot::plot_model(bmi_altWC, type="int", title="BMI slopes in all patients")+
+  scale_color_manual(labels=c('Sustained cure', 'Recurrence'),
+                     values=c("darkgrey","#377EB8"))+
+  scale_fill_manual(labels=c('Sustained cure', 'Recurrence'),
+                    values=c("darkgrey","#377EB8"))+
+  labs(x='Treatment week',y=bquote('BMI'~(kg/m^2)), colour= "Outcome group")+
+  theme_classic()+
+  geom_text(data=text, aes(x =.1, y = 21.3, label = text), parse=T,
+  inherit.aes = FALSE, show.legend = FALSE,
+  hjust   = -0.1,
+  vjust   = -1, size=4.2)+
+  theme(legend.position = "none", 
+        axis.text.x=element_text(size=12),
+        axis.title.x=element_text(size=15),
+        axis.title.y = element_blank(),
+        axis.text.y =element_blank(), axis.ticks.y = element_blank(),
+        plot.title = element_text(size=16))
+
+text<-data.frame(
+  text = "paste('P-value: 6.71x10'^{-5}*'; Test stat: -4.049')" 
+)
+p_hr<-sjPlot::plot_model(hr_alt, type="int", title="Heart rate slopes in case-control")+
+  scale_color_manual(labels=c('Sustained cure', 'Recurrence'),
+                     values=c("darkgrey","#377EB8"))+
+  scale_fill_manual(labels=c('Sustained cure', 'Recurrence'),
+                    values=c("darkgrey","#377EB8"))+
+  labs(x='Treatment week',y='Heart rate (bpm)', colour= "Outcome group")+
+  theme_classic()+
+  geom_text(data=text, aes(x =.1, y = 60, label = text), parse=T,
+  inherit.aes = FALSE, show.legend = FALSE,
+  hjust   = -0.1,
+  vjust   = -1, size=4.2)+
+  theme(legend.position = "none",axis.text=element_text(size=12),
+        axis.title=element_text(size=15),
+        plot.title = element_text(size=16))
+
+text<-data.frame(
+  text = "paste('P-value: 9.84x10'^{-3}*'; Test stat: -2.582')" 
+)
+p_hrWC<-sjPlot::plot_model(hr_altWC, type="int", title="Heart rate slopes in all patients")+
+  scale_color_manual(labels=c('Sustained cure', 'Recurrence'),
+                     values=c("darkgrey","#377EB8"))+
+  scale_fill_manual(labels=c('Sustained cure', 'Recurrence'),
+                    values=c("darkgrey","#377EB8"))+
+  labs(x='Treatment week',y='Heart rate (bpm)', colour= "Outcome group")+
+  theme_classic()+
+  geom_text(data=text, aes(x =.1, y = 60, label = text), parse=T,
+  inherit.aes = FALSE, show.legend = FALSE,
+  hjust   = -0.1,
+  vjust   = -1, size=4.2)+
+  theme(legend.position = "none", 
+        axis.text.x=element_text(size=12),
+        axis.title.x=element_text(size=15),
+        axis.title.y = element_blank(),
+        axis.text.y =element_blank(), axis.ticks.y = element_blank(),
+        plot.title = element_text(size=16))
+
+
+text<-data.frame(
+  text = "paste('P-value: 0.934; Test stat: -0.082')" 
+)
+p_ML<-sjPlot::plot_model(MLR_alt, type="int", title="ML ratio slopes in case-control")+
+  scale_color_manual(labels=c('Sustained cure', 'Recurrence'),
+                     values=c("darkgrey","#377EB8"))+
+  scale_fill_manual(labels=c('Sustained cure', 'Recurrence'),
+                    values=c("darkgrey","#377EB8"))+
+  labs(x='Treatment week',y='Monocyte:Lymphocyte ratio', colour= "Outcome group")+ 
+  theme_classic()+
+  geom_text(data=text, aes(x =.1, y = 0.15, label = text), parse=T,
+  inherit.aes = FALSE, show.legend = FALSE,
+  hjust   = -0.1,
+  vjust   = -1, size=4.2)+
+  theme(legend.position = "none", 
+        axis.text.x=element_text(size=12),
+        axis.title.x=element_text(size=15),
+        plot.title = element_text(size=16))
+
+text<-data.frame(
+  text = "paste('P-value: 0.706; Test stat: 0.377')" 
+)
+p_MLWC<-sjPlot::plot_model(MLR_altWC, type="int", title="ML ratio slopes in all patients")+
+  scale_color_manual(labels=c('Sustained cure', 'Recurrence'),
+                     values=c("darkgrey","#377EB8"))+
+  scale_fill_manual(labels=c('Sustained cure', 'Recurrence'),
+                    values=c("darkgrey","#377EB8"))+
+  labs(x='Treatment week',y='Monocyte:Lymphocyte ratio', colour= "Outcome group")+ 
+  theme_classic()+
+  geom_text(data=text, aes(x =.1, y = 0.1, label = text), parse=T,
+  inherit.aes = FALSE, show.legend = FALSE,
+  hjust   = -0.1,
+  vjust   = -1, size=4.2)+
+  theme(legend.position = "none", 
+        axis.text.x=element_text(size=12),
+        axis.title.x=element_text(size=15),
+        axis.title.y = element_blank(),
+        axis.text.y =element_blank(), axis.ticks.y = element_blank(),
+        plot.title = element_text(size=16))
+
+
+text<-data.frame(
+  text = "paste('P-value: 3.4x10'^{-4}*'; Test stat:-3.589')" 
+)
+p_LPR<-sjPlot::plot_model(LPR_altWC, type="int", title="LP ratio slopes in all patients")+
+  scale_color_manual(labels=c('Sustained cure', 'Recurrence'),
+                     values=c("darkgrey","#377EB8"))+
+  scale_fill_manual(labels=c('Sustained cure', 'Recurrence'),
+                    values=c("darkgrey","#377EB8"))+
+  labs(x='Treatment week',y=bquote('LP ratio'), colour= "Outcome group")+
+  theme_classic()+
+  geom_text(data=text, aes(x =.1, y =0.01, label = text), parse=T,
+  inherit.aes = FALSE, show.legend = FALSE,
+  hjust   = -0.1,
+  vjust   = -1, size=4.2)
+
+p_LPRnoLeg<-sjPlot::plot_model(LPR_altWC, type="int", title="LP ratio slopes in all patients")+
+  scale_color_manual(labels=c('Sustained cure', 'Recurrence'),
+                     values=c("darkgrey","#377EB8"))+
+  scale_fill_manual(labels=c('Sustained cure', 'Recurrence'),
+                    values=c("darkgrey","#377EB8"))+
+  labs(x='Treatment week',y=bquote('LP ratio'), colour= "Outcome group")+
+  theme_classic()+
+  geom_text(data=text, aes(x =.1, y =0.01, label = text), parse=T,
+  inherit.aes = FALSE, show.legend = FALSE,
+  hjust   = -0.1,
+  vjust   = -1, size=4.2)+
+  theme(legend.position = "none", 
+        axis.text=element_text(size=12),
+        axis.title=element_text(size=15),
+        plot.title = element_text(size=16))
+
+legend<-get_legend(p_LPR)
+
+plot_all<-gridExtra::grid.arrange(p_bmi,p_bmiWC,
+                                  p_hr,p_hrWC,
+                                  p_ML,p_MLWC,
+                                  p_LPRnoLeg,legend,ncol=2,nrow=4)
+plot_CC<-gridExtra::grid.arrange(p_bmi, p_hr, p_ML, nrow=3)
+plot_WC<-gridExtra::grid.arrange(p_bmiWC,p_hrWC,p_MLWC,p_LPR,nrow=4)
+
+
+ggsave('SigIntplots_allSig.png',plot_all,width=13,height=14,dpi=600)
+ggsave('SigIntplots_CC.png',plot_CC,width=8,height=8,dpi=600)
+ggsave('SigIntplots_WC.png',plot_WC,width=8,height=8,dpi=600)
+```
+
+## VarCompTest
+```{r}
+## for all vars of interest
+model_intercept <- lmer(`var` ~ visit_num*label + (1|scrno),
+                          data = merged, REML=F)
+model_slope <- lmer(`var` ~ visit_num*label + (visit_num|scrno),
+                      data = merged, REML=F)
+
+varCompTest(model_slope,model_intercept,pval.comp="approx")
+```
