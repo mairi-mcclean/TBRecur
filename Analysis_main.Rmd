@@ -1,0 +1,2307 @@
+---
+title: "Analysis_main"
+output: html_document
+date: "2026-08-07"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Packages
+```{r}
+#devtools::install_github("SFUStatgen/logistlogF")
+
+pkgs<- c("tidyverse", "survival", "pROC", "broom","boot","RColorBrewer",
+         "ggforestplot","forester","here", "gridExtra","gt", "purrr","ggh4x",
+         "ComplexHeatmap","circlize","logistlogF","ggnewscale","logistlogF")
+lapply(pkgs,require, character.only=TRUE)
+set.seed(30)
+```
+
+## Data
+```{r}
+score_dir <- ".../data"
+score_files <- list.files(score_dir,full.names = TRUE)
+score_list <- lapply(score_files, read.csv)
+score_files
+```
+
+### Format data
+
+> Ensure df contains metadata:
+>> USUBJID
+>> label (e.g. "label binary")
+>> Case-control pair ID
+
+```{r}
+w0<-scores[[1]]
+w1<-scores[[2]]
+w2<-scores[[4]]
+w9<-scores[[6]]
+w14<-scores[[3]]
+w26<-scores[[5]]
+```
+
+## Signatures
+
+```{r}
+signatures_full<-c("Zak_RISK_16_OriginalModel","MAMS_6_mean_OriginalModel",
+              "RISKgeo_6_OriginalModel","Sweeney_Add_OriginalModel",
+              "Vargas_OriginalModel","Tabone27_OriginalModel", "Long_10")
+
+signatures<-c("Zak_RISK_16_OriginalModel","MAMS_6_mean_OriginalModel",
+              "RISKgeo_6_OriginalModel","Sweeney_Add_OriginalModel",
+              "Vargas_OriginalModel", "Long_10")
+
+dfs<-list(w1 = w1, w2 = w2, w9 = w9, w14 = w14, w26 = w26)
+
+row_list<-list()
+```
+
+### Matched ROC
+### Function
+```{r}
+get_concord_pairs<- function(df,pair_id, var, label) {
+  paired <- df|>
+    group_by(.data[[pair_id]]) |>
+    mutate(n_case = sum(.data[[label]] == 1),
+           n_ctrl = sum(.data[[label]] == 0)) |>
+    filter(n_case == 1 & n_ctrl == 1) |>
+    summarise(d = .data[[var]][.data[[label]]== 1] -
+                .data[[var]][.data[[label]] == 0])
+  mean(paired$d > 0) + 0.5 * mean(paired$d == 0)
+} 
+```
+
+
+#### Week 1-26
+```{r}
+### in loop
+rows_list<-list()
+
+for (df_name in names(dfs)) {
+  df<-dfs[[df_name]]
+  rows<-list()
+  
+  for (sig in signatures_full) {
+    dat<-df|>
+      filter(!is.na(.data[[sig]]))
+
+    ## get point estimate
+    roc_val <- get_concord_pairs(dat, "pair_id", sig, "label_binary")
+
+    ## get bootstrap
+    #### Pair IDs to exclude the orphan draws
+    complete_pairs <- dat |>
+      group_by(pair_id) |>
+      summarise(n_case = sum(label_binary == 1), n_ctrl = sum(label_binary == 0)) |>
+      filter(n_case == 1 & n_ctrl == 1) |>
+      pull(pair_id)
+      
+    pair_ids <- complete_pairs 
+    
+    B<-2000
+    boot_conc<-numeric(B)
+    
+    for (b in seq_len(B)){
+      boot_pairs<-sample(pair_ids, replace=TRUE)
+      boot_df<-do.call(rbind, lapply(seq_along(boot_pairs), function(i) {
+        p<-boot_pairs[i]
+        rows<-dat[dat$pair_id == p, ]
+        rows$boot_pair_id <-paste0(p, "_rep", i)
+        rows
+        }))
+      
+      boot_conc[b] <-get_concord_pairs(boot_df,"boot_pair_id",sig,"label_binary" )
+    }
+    ci_low<-quantile(boot_conc, c(0.025, 0.975))[[1]]
+    ci_high<-quantile(boot_conc, c(0.025, 0.975))[[2]]
+
+    rows[[sig]]<-tibble(
+      timepoint = df_name,
+      signature = sig,
+      matched_ROC = roc_val,
+      boot_ci_25 = ci_low,
+      boot_ci_95 = ci_high
+      )
+    
+    }
+  rows_list[[df_name]]<-bind_rows(rows)
+
+}
+
+
+final_df<-bind_rows(rows_list)
+final_df
+```
+
+#### Week 0
+```{r}
+W0rows_list<-list()
+
+for (sig in signatures) {
+  dat<-w0|>
+    filter(!is.na(.data[[sig]]))
+  
+  ## get point estimate
+  roc_val <- get_concord_pairs(dat, "pair_id", sig, "label_binary")
+  
+  ## get bootstrap
+  #### Pair IDs to exclude the orphan draws
+  complete_pairs <- dat |>
+    group_by(pair_id) |>
+    summarise(n_case = sum(label_binary == 1), n_ctrl = sum(label_binary == 0)) |>
+    filter(n_case == 1 & n_ctrl == 1) |>
+    pull(pair_id)
+    
+  pair_ids <- complete_pairs 
+  
+  B<-2000
+  boot_conc<-numeric(B)
+  
+  for (b in seq_len(B)){
+    boot_pairs<-sample(pair_ids, replace=TRUE)
+    boot_df<-do.call(rbind, lapply(seq_along(boot_pairs), function(i) {
+      p<-boot_pairs[i]
+      rows<-dat[dat$pair_id == p, ]
+      rows$boot_pair_id <-paste0(p, "_rep", i)
+      rows
+      }))
+    
+    boot_conc[b] <-get_concord_pairs(boot_df,"boot_pair_id",sig,"label_binary" )
+  }
+  ci_low<-quantile(boot_conc, c(0.025, 0.975))[[1]]
+  ci_high<-quantile(boot_conc, c(0.025, 0.975))[[2]]
+  
+  W0rows_list[[sig]]<-tibble(
+    timepoint = "w0",
+    signature = sig,
+    matched_ROC = roc_val,
+    boot_ci_25 = ci_low,
+    boot_ci_95 = ci_high
+    )
+  
+}
+
+w0_final_df<-bind_rows(W0rows_list)
+sig_matched_ROC<-bind_rows(w0_final_df, final_df)
+sig_matched_ROC 
+```
+
+### C-index plot
+```{r}
+sig_matched_ROC$timepoint<- gdata::reorder.factor(
+    sig_matched_ROC$timepoint,
+    new.order = c('w0','w1','w2','w9','w14', 'w26'))
+```
+
+```{r}
+col_palette = c(brewer.pal(8,"Dark2")[1:7])
+
+ggplot(sig_matched_ROC, aes(x=timepoint, y=matched_ROC, color=signature)) + 
+  geom_pointrange(aes(ymin=boot_ci_25, ymax=boot_ci_95),
+                  position = position_dodge(width = 0.6) )+
+  labs(title = "Matched C-index for within-pairs concordance",
+       subtitle = "Primary analysis: Original transcriptomic signature scores")+
+  scale_y_continuous(name="C-Index")+
+  scale_color_manual(
+    values = col_palette,
+    labels=c('Long-10','MAMS-6','RISK-6','Sweeeny-3',
+            'Tabone-27','Vargas-18','RISK-16')
+  ) +
+  scale_x_discrete(labels = c("Baseline","Week 1",
+                              "Week 2","Week 9",
+                              "Week 14","Week 26"))+
+  labs(color = "Signatures", x="Weeks on treatment") +
+  theme_minimal()
+
+```
+
+
+
+### Opt-corrected Sens/spec 
+#### Functions for ties at Youden's
+```{r}
+get_cutpoint <- function(labels, scores) {
+  roc_obj <- pROC::roc(labels, scores, quiet = TRUE)
+  all_cp <- coords(roc_obj, x = "all",
+                   ret = c("threshold", "sensitivity", "specificity"))
+  j <- all_cp$sensitivity + all_cp$specificity - 1
+  max_j <- max(j)
+  tied <- all_cp[j == max_j, ]  # all thresholds tied at max Youden's J
+  if (nrow(tied) > 1) {
+    dist_topleft <- sqrt((1 - tied$sensitivity)^2 + (1 - tied$specificity)^2)
+    tied <- tied[which.min(dist_topleft), ]
+  }
+  tied
+}
+```
+
+
+#### W0
+```{r}
+rows<-list()
+#By signatures
+for (sig in signatures){
+  dat_valid<-w0|>
+    filter(!is.na(.data[[sig]]))
+
+  complete_pairs <- dat_valid |>
+    group_by(pair_id) |>
+    summarise(n_case = sum(label_binary == 1), n_ctrl = sum(label_binary == 0), .groups = "drop") |>
+    filter(n_case == 1, n_ctrl == 1) |>
+    pull(pair_id)
+
+  dat <- dat_valid |>
+    filter(pair_id %in% complete_pairs)
+  
+  ### get apparent values + format into df
+  coords_OG<-get_cutpoint(dat[['label_binary']],dat[[sig]])
+    
+  rows[[sig]]<-tibble(
+    timepoint = 'w0',
+    signature = sig,
+    sens_og = coords_OG$sensitivity,
+    spec_og = coords_OG$specificity
+    )
+  
+  pair_ids <- unique(dat$pair_id)
+  
+  B<-1000
+  boot_conc<-numeric(B)
+  opt_sens<-numeric(B)
+  opt_spec<-numeric(B)
+
+  for (b in seq_len(B)){
+    boot_pairs<-sample(pair_ids, replace=TRUE)
+    boot_df<-do.call(rbind, lapply(seq_along(boot_pairs), function(i) {
+      p<-boot_pairs[i]
+      rows<-dat[dat$pair_id == p, ]
+      rows$boot_pair_id <-paste0(p, "_rep", i)
+      rows
+      }))
+    
+    
+    coords_boot<-get_cutpoint(boot_df[['label_binary']],boot_df[[sig]])
+    thresh<-coords_boot$threshold
+    sens_b<-coords_boot$sensitivity
+    spec_b<-coords_boot$specificity
+  
+    
+    ## in OG data
+    label_thres = ifelse(dat[[sig]] > thresh, 1,0)
+    
+    sens_b_OG<-sum(dat$label_binary == 1 & label_thres == 1) / 
+      (sum(dat$label_binary == 1))
+  
+    spec_b_OG<-sum((dat$label_binary == 0) & label_thres == 0) / 
+    (sum(dat$label_binary == 0))
+  
+    
+    diff_sens<-sens_b - sens_b_OG
+    diff_spec<-spec_b - spec_b_OG
+    opt_sens[b]<-diff_sens
+    opt_spec[b]<-diff_spec
+  
+    }
+  opt_sens_tot<-mean(opt_sens)
+  opt_spec_tot<-mean(opt_spec)
+  
+  rows[[sig]]<-rows[[sig]] |>
+      mutate(sens_opt = opt_sens_tot,
+             spec_opt = opt_spec_tot)
+}
+
+w0_opt_res<-bind_rows(rows)
+w0_opt_res
+```
+
+#### WK1-26
+```{r}
+row_list<-list()
+
+for (df_name in names(dfs)){
+  df<-dfs[[df_name]]
+  rows<-list()
+  
+  for (sig in signatures_full){
+    dat_valid<-df|>
+      filter(!is.na(.data[[sig]]))
+  
+    complete_pairs <- dat_valid |>
+      group_by(pair_id) |>
+      summarise(n_case = sum(label_binary == 1), n_ctrl = sum(label_binary == 0), .groups = "drop") |>
+      filter(n_case == 1, n_ctrl == 1) |>
+      pull(pair_id)
+  
+    dat <- dat_valid |>
+      filter(pair_id %in% complete_pairs)
+    
+    ### get apparent values + format into df
+    coords_OG<-get_cutpoint(dat[['label_binary']],dat[[sig]])
+      
+    rows[[sig]]<-tibble(
+      timepoint = df_name,
+      signature = sig,
+      sens_og = coords_OG$sensitivity,
+      spec_og = coords_OG$specificity
+      )
+    
+    pair_ids <- unique(dat$pair_id)
+    
+    B<-1000
+    boot_conc<-numeric(B)
+    opt_sens<-numeric(B)
+    opt_spec<-numeric(B)
+  
+    for (b in seq_len(B)){
+      boot_pairs<-sample(pair_ids, replace=TRUE)
+      boot_df<-do.call(rbind, lapply(seq_along(boot_pairs), function(i) {
+        p<-boot_pairs[i]
+        rows<-dat[dat$pair_id == p, ]
+        rows$boot_pair_id <-paste0(p, "_rep", i)
+        rows
+        }))
+      
+      coords_boot<-get_cutpoint(boot_df[['label_binary']],boot_df[[sig]])
+      thresh<-coords_boot$threshold
+      sens_b<-coords_boot$sensitivity
+      spec_b<-coords_boot$specificity
+    
+      
+      ## in OG data
+      label_thres = ifelse(dat[[sig]] > thresh, 1,0)
+      
+      sens_b_OG<-sum(dat$label_binary == 1 & label_thres == 1) / 
+        (sum(dat$label_binary == 1))
+    
+      spec_b_OG<-sum(dat$label_binary == 0 & label_thres == 0) / 
+      (sum(dat$label_binary == 0))
+    
+      
+      diff_sens<-sens_b - sens_b_OG
+      diff_spec<-spec_b - spec_b_OG
+      opt_sens[b]<-diff_sens
+      opt_spec[b]<-diff_spec
+    
+      }
+    opt_sens_tot<-mean(opt_sens)
+    opt_spec_tot<-mean(opt_spec)
+    
+    rows[[sig]]<-rows[[sig]] |>
+      mutate(sens_opt = opt_sens_tot,
+             spec_opt = opt_spec_tot)
+  }
+  
+  row_list[[df_name]]<-bind_rows(rows)
+
+}
+
+all_rows<-bind_rows(row_list)
+all_rows
+```
+
+
+```{r}
+#### Get all signatures
+sig_performance_opt<-bind_rows(w0_opt_res,all_rows)
+
+sig_performance_opt$timepoint<- gdata::reorder.factor(
+    sig_performance_opt$timepoint,
+    new.order = c('w0','w1','w2','w9','w14', 'w26'))
+
+##### Get final results (sens/spec/PPV/NPV)
+prevalence = 8/310 ## number of cases in whole cohort
+(8/310) * 100
+
+sig_performance_opt |>
+  mutate(sens_corr = sens_og - sens_opt, 
+         spec_corr = spec_og - spec_opt,
+         PPV = ((sens_corr * prevalence) / ((sens_corr * prevalence) + ((1-spec_corr) * (1-prevalence)))), 
+         NPV = ((spec_corr * (1-prevalence)) / ((spec_corr * (1- prevalence)) + ((1-sens_corr) * prevalence)))
+         ) 
+
+```
+
+```{r}
+# on treatment: 75% sensitivity and 80% specificity
+PPV_target = ((0.75 * prevalence) / ((0.75 * prevalence) + ((1-0.80) * (1-prevalence)))) 
+NPV_target = ((0.80 * (1-prevalence)) / ((0.80 * (1- prevalence)) + ((1-0.75) * prevalence)))
+       
+```
+
+
+#### Table
+```{r}
+### Make a nice table
+sig_performance_opt |> 
+  dplyr::arrange(signature) |>
+  mutate(signature = signature |>
+           recode_values(
+             "Long_10" ~ "Long-10",
+                "MAMS_6_mean_OriginalModel" ~"MAMS-6",
+                "RISKgeo_6_OriginalModel" ~"RISK-6",
+                "Sweeney_Add_OriginalModel"~"Sweeney-3",
+                "Tabone27_OriginalModel"~"Tabone-27",
+                "Vargas_OriginalModel"~"Vargas-18",
+                "Zak_RISK_16_OriginalModel"~"RISK-16"),
+         timepoint = timepoint |>
+           recode_values(
+             "w0"~"Week 0",
+             "w1"~"Week 1",
+             "w2"~"Week 2",
+             "w9"~"Week 9",
+             "w14"~"Week 14",
+             "w26"~"Week 26"
+           )) |>
+  dplyr::rename("Signature" = signature,
+              "Visit" = timepoint,
+              "Sensitivity" = sens_corr,
+              "Specificity" = spec_corr) |>
+  select(c(Signature, Visit, Sensitivity, Specificity, PPV, NPV)) |>
+  gt() |>
+ tab_header(
+   title = md("**Transcriptomic signature predicitive performance by study visit**"))|>
+  tab_footnote(
+    footnote = "*Calculated using prevalence in the entire trial cohort") |>
+  cols_align(align="center") |>
+  cols_label(
+    PPV = md("PPV*"),
+    NPV = md("NPV*")
+  ) |>
+  fmt_number(decimals = 3)
+
+```
+
+#### Plot
+```{r}
+ggplot(sig_performance_opt, aes(x=timepoint, group=signature)) + 
+  geom_line(aes(y=PPV, color="cornflowerblue"))+
+  geom_line(aes(y=NPV, color="orange2")) + 
+  scale_y_continuous(
+    name = "Positive predictive value",
+   sec.axis = sec_axis(~.*1,name = "Negative predictive value")
+ ) +
+  scale_color_manual(values=c("cornflowerblue","orange2"),
+                     labels=c("PPV", "NPV")) +
+  theme_bw() +
+  labs(color="Metric",
+       x="Weeks on treatment",
+      title = "Transcriptomic signature score PPV and NPV over time") +
+  facet_wrap(~signature,
+             labeller=as_labeller(c(
+               "Long_10" = "Long-10",
+               "MAMS_6_mean_OriginalModel" ="MAMS-6",
+                "RISKgeo_6_OriginalModel" ="RISK-6",
+                "Sweeney_Add_OriginalModel"="Sweeney-3",
+                "Tabone27_OriginalModel"="Tabone-27",
+                "Vargas_OriginalModel"="Vargas-18",
+                "Zak_RISK_16_OriginalModel"="RISK-16"
+             )))
+```
+
+
+```{r}
+col_palette = c(brewer.pal(8,"Dark2")[1:7])
+
+p<-ggplot(sig_performance_opt, 
+          aes(x = 1 - spec_corr, y = sens_corr,
+              color = signature)) +
+  geom_point(size = 3, aes(shape=signature)) +
+  scale_shape_manual(labels = c('Long-10','MAMS-6','RISK-6','Sweeeny-3',
+            'Tabone-27','Vargas-18','RISK-16'),
+            values = rep(5:17, len = 7)) + 
+  scale_color_manual(values = col_palette,
+                     labels = c('Long-10','MAMS-6','RISK-6','Sweeeny-3',
+            'Tabone-27','Vargas-18','RISK-16')) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "grey50") +
+  scale_x_continuous("1 - Specificity (FPR)", limits = c(0, 1)) +
+  scale_y_continuous("Sensitivity (TPR)", limits = c(0, 1)) +
+  coord_equal() +
+  theme_bw() +
+  labs(title = "Optimism-corrected sensitivity and specificity by timepoint", 
+       shape = "Signature",
+       color= "Signature") +
+  facet_wrap(~timepoint,
+             labeller = as_labeller(c("w0" = "Baseline",
+                                      "w1" = "Week 1",
+                                      "w2" = "Week 2",
+                                      "w9" = "Week 9",
+                                      "w14" = "Week 14",
+                                      "w26" = "Week 26"
+                                      )))
+
+```
+
+
+### Misclassifications
+```{r}
+### read in signature matrix
+# df needs: patient_id, pair_id, label (1=case/0=control), timepoint, signature score
+df_comb<-read.csv("metadata.csv")
+
+df_misclass<-df_comb |>
+  select(c(USUBJID,AVISITN,label,Sweeney_Add,Long_10,MAMS_6_mean,RISKgeo_6,
+           Tabone27,Vargas,Zak_RISK_16))|>
+  filter(AVISITN %in% c(0,1,2,9,14,26)) 
+  pivot_longer(cols = c(Sweeney_Add,Long_10,MAMS_6_mean,RISKgeo_6,
+           Tabone27,Vargas,Zak_RISK_16),
+               names_to = "signature",
+               values_to = "score")
+```
+
+```{r}
+results <- list()
+
+for (tp in unique(df_misclass$AVISITN)) {
+  for (sig in unique(df_misclass$signature)) {
+
+    cat(sprintf("Processing: %s / %s ...\n", tp, sig))
+
+    res <- tryCatch({
+
+      d_raw <- df_misclass %>% filter(AVISITN == tp, signature == sig)
+
+      # drop rows missing a score
+      d <- d_raw %>% filter(!is.na(score))
+
+      # keep only pairs where BOTH members still have a valid score
+      complete_pairs <- d %>%
+        group_by(pair_id) %>%
+        summarise(n_case = sum(label_binary == 1), n_ctrl = sum(label_binary == 0), .groups = "drop") %>%
+        filter(n_case == 1, n_ctrl == 1) %>%
+        pull(pair_id)
+
+      d <- d %>% filter(pair_id %in% complete_pairs)
+
+      n_dropped_na    <- nrow(d_raw) - nrow(d %>% filter(pair_id %in% unique(d_raw$pair_id)))
+      n_dropped_pairs <- length(unique(d_raw$pair_id)) - length(complete_pairs)
+
+      if (nrow(d) == 0 || length(complete_pairs) < 3) {
+        stop(sprintf("insufficient complete pairs after NA removal (%d pairs remain, started with %d)",
+                      length(complete_pairs), length(unique(d_raw$pair_id))))
+      }
+
+      cat(sprintf("  -> dropped %d incomplete pairs due to NA scores; %d pairs remain\n",
+                  n_dropped_pairs, length(complete_pairs)))
+
+      n_pat <- nrow(d)
+      miscl_count <- setNames(numeric(n_pat), d$USUBJID)
+      n_appear    <- setNames(numeric(n_pat), d$USUBJID)
+      n_failed    <- 0
+
+      B <- 100
+      pairs <- unique(d$pair_id)
+
+      for (b in seq_len(B)) {
+        drawn <- sample(pairs, length(pairs), replace = TRUE)
+        boot_df <- do.call(rbind, lapply(seq_along(drawn), function(i) {
+          rows <- d[d$pair_id == drawn[i], ]
+          rows$pair_id_boot <- i
+          rows
+        }))
+        
+        # use signature scores directly 
+        roc_b <- tryCatch(pROC::roc(boot_df$label_binary, boot_df$score, quiet = TRUE), error = function(e) NULL)
+        if (is.null(roc_b)) { n_failed <- n_failed + 1; next }
+
+        thresh_b <- as.numeric(pROC::coords(roc_b, "best", best.method = "youden")$threshold)[1]
+        if (!is.finite(thresh_b)) { n_failed <- n_failed + 1; next }
+
+        pred_orig <- as.numeric(d$score > thresh_b)
+
+        miscl <- pred_orig != d$label_binary
+        miscl_count[as.character(d$USUBJID)] <- miscl_count[as.character(d$USUBJID)] + miscl
+        n_appear[as.character(d$USUBJID)]    <- n_appear[as.character(d$USUBJID)] + 1
+      }
+
+      cat(sprintf("  -> %d / %d bootstrap replicates failed\n", n_failed, B))
+
+      tibble(
+        USUBJID = d$USUBJID,
+        pair_id = d$pair_id,
+        label = d$label_binary,
+        timepoint = tp,
+        signature = sig,
+        misclass_rate = miscl_count / n_appear
+      )
+
+    }, error = function(e) {
+      cat(sprintf("  !! SKIPPED %s / %s: %s\n", tp, sig, conditionMessage(e)))
+      NULL
+    })
+
+    if (!is.null(res)) results[[paste(tp, sig)]] <- res
+  }
+}
+
+heat_df <- bind_rows(results)
+```
+
+```{r}
+heat_df<-heat_df |>
+  mutate(signature = signature |>
+           recode_values(
+             "Long_10" ~ "Long-10",
+                "MAMS_6_mean" ~"MAMS-6",
+                "RISKgeo_6" ~"RISK-6",
+                "Sweeney_Add"~"Sweeney-3",
+                "Tabone27"~"Tabone-27",
+                "Vargas"~"Vargas-18",
+                "Zak_RISK_16"~"RISK-16"))
+
+patient_meta <- heat_df %>%
+  distinct(USUBJID,pair_id,label) %>%
+  arrange(desc(label), pair_id) # sort by label, then pair
+
+
+patient_order<-patient_meta$USUBJID
+
+signatures <- unique(heat_df$signature)
+
+mat_list<-lapply(signatures,function(sig) {
+  wide<-heat_df |>
+    filter(signature == sig) |>
+    select(USUBJID, timepoint, misclass_rate) |>
+    pivot_wider(names_from = timepoint, values_from = misclass_rate)
+  
+  
+  m<-as.matrix(wide[,-1])
+  rownames(m)<-wide$USUBJID
+
+  full<-matrix(NA_real_,nrow=length(patient_order), ncol=ncol(m),
+               dimnames = list(patient_order, colnames(m)))
+  full[rownames(m), colnames(m)] <-m
+  full
+})
+
+names(mat_list)<-signatures
+
+label_vec<-setNames(patient_meta$label, patient_meta$USUBJID)[patient_order]
+label_vec<-factor(ifelse(label_vec == 1, "Recurrence", "Sustained cure"),
+                  levels = c("Recurrence","Sustained cure"))
+
+col_fun <-colorRamp2(c(0,1), c("white", "firebrick"))
+```
+
+
+```{r}
+png("Score_Misclass.png", width=15.25,height=5.25,units="in",res=1200)
+
+
+ht_list <- Heatmap(
+  mat_list[[1]],
+  name ="Misclassification rate",
+  col = col_fun,
+  na_col = "grey85",
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+  row_split = label_vec,       
+  row_title = NULL,           
+  row_gap = unit(2, "mm"),
+  show_row_names = TRUE,
+  column_title = signatures[1],
+  column_title_gp = gpar(fontsize=15, fontface = "bold"),
+  rect_gp = gpar(col = "white", lwd = 0.5),
+  heatmap_legend_param = list(
+    title_gp = gpar(fontsize = 16, fontface = "bold"),
+    labels_gp = gpar(fontsize = 12)
+  )
+)
+
+for (i in 2:length(mat_list)) {
+  ht_list <- ht_list + Heatmap(
+    mat_list[[i]],
+    name = signatures[i],
+    col = col_fun,
+    na_col = "grey85",
+    cluster_rows = FALSE,
+    cluster_columns = FALSE,
+    row_split = label_vec,
+    row_title = NULL,
+    row_gap = unit(2, "mm"),
+    show_row_names = FALSE,
+    show_heatmap_legend = FALSE,   # fixes issue 3, see below
+    column_title = signatures[i],
+    column_title_gp = gpar(fontsize=15, fontface = "bold"),
+    rect_gp = gpar(col = "white", lwd = 0.5)
+  )
+}
+
+row_anno <- rowAnnotation(
+  Group = label_vec,
+  col = list(Group = c("Recurrence" = "#D85A30", "Sustained cure" = "#378ADD")),
+  width = unit(4, "mm"),
+  annotation_legend_param = list(
+    Group = list(
+      title_gp = gpar(fontsize = 16, fontface = "bold"),
+      labels_gp = gpar(fontsize = 12)
+    )
+  )
+)
+
+ht_final <- row_anno + ht_list
+
+
+ComplexHeatmap::draw(ht_final, ht_gap = unit(3, "mm"),
+                     merge_legend = TRUE)
+
+dev.off()
+```
+
+##### Check for disease association
+```{r}
+ctl_df<-heat_df|>
+  filter(label == 0) |>
+  group_by(timepoint) |>
+  arrange(desc(misclass_rate))
+print(table(ctl_df$USUBJID))
+
+case_df<-heat_df|>
+  filter(label == 1) |>
+  group_by(timepoint) |>
+  arrange(desc(misclass_rate))
+print(table(case_df$USUBJID))
+```
+
+```{r}
+### misclassifications with disease severity - include PAIR_ID + clinical covariates (including matching covariates)
+dfCC<-read_csv('.../metadata2.csv')
+
+dfCC<-dfCC%>%
+  group_by(USUBJID) %>%
+  fill(age, .direction = "downup") |>
+  fill(sex, .direction = "downup") |>
+  mutate(baseline_lungEFF = lung_eff[which(AVISITN == -1)],
+        baseline_noCav = no_cav[which(AVISITN == -1)]
+        ) |>
+  dplyr::ungroup() 
+  select(c(USUBJID,baseline_lungEFF,baseline_noCav))|>
+  distinct()
+
+heat_df_cov<-merge(heat_df, dfCC, by = c('USUBJID'))
+```
+
+
+####### KDEs
+```{r}
+ggplot(heat_df_cov, aes(x=misclass_rate,
+                    color = as.factor(label),
+                    fill = as.factor(label)))+
+   geom_histogram(aes(y=..density..), alpha=0.5,position="identity") +
+   geom_density(alpha=.2) +
+  theme_classic() +
+  facet_wrap(~signature) +
+  scale_fill_discrete(labels = c("Control", "Recurrence")) +
+  labs(x= "Misclassification rate",
+       y= "Count",
+       fill = "Outcome") +
+  guides(color = "none") +
+  theme(legend.title = element_text(size = 12))
+```
+
+
+```{r}
+heat_df_cov_CONTROL <- heat_df_cov[heat_df_cov$label == 0, ]
+heat_df_cov_CASE <- heat_df_cov[heat_df_cov$label == 1, ]
+
+ggplot(heat_df_cov_CONTROL[heat_df_cov_CONTROL$timepoint == 0, ], 
+       aes(y=misclass_rate,x=as.factor(baseline_lungEFF))) + 
+  geom_point()+
+  theme_bw() +
+  labs(x = "Baseline percent lung affected",
+       y = "Misclassification rate (%)")
+```
+
+```{r}
+#### Baseline
+colnames(dfCC)
+heat_df_cov_BL<- dfCC|>
+  filter(AVISITN == 0)
+heat_df_cov_BL
+```
+
+```{r}
+sigs <-c('Long_10','MAMS_6_mean','RISKgeo_6', 'Sweeney_Add','Tabone27',
+           'Vargas','Zak_RISK_16')
+
+for (sig in sigs) {
+  paste0("Signature", sig)
+  print(cor.test(as.numeric(heat_df_cov_BL$baseline_lungEFF), 
+         heat_df_cov_BL[[sig]], method = "spearman"))
+  print(cor.test(as.numeric(heat_df_cov_BL$baseline_noCav), 
+         heat_df_cov_BL[[sig]], method = "spearman"))
+}
+
+```
+
+
+```{r}
+df_plot<-df_comb |>
+  select(c(USUBJID,AVISITN,label,
+           Sweeney_Add,Long_10,MAMS_6_mean,RISKgeo_6,Tabone27,Vargas,Zak_RISK_16))|>
+  mutate(label_binary = case_when(
+        label == "relapse" ~ 1,
+        label == "control" ~ 0
+      )) |>
+  pivot_longer(cols = c(Sweeney_Add,Long_10,MAMS_6_mean,RISKgeo_6,Tabone27,Vargas,Zak_RISK_16),
+               names_to = "signature",
+               values_to = "value")
+
+df_plot<-merge(df_plot, dfCC, by = c('USUBJID'))
+```
+
+
+```{r}
+patient_level <- heat_df_cov %>%
+  filter(label == 0) %>%
+  group_by(USUBJID) %>%
+  summarise(baseline_lungEFF = first(baseline_lungEFF),
+            baseline_noCav = first(baseline_noCav),
+            mean_misclass = mean(misclass_rate, na.rm = TRUE))
+
+cor.test(as.numeric(patient_level$baseline_lungEFF), 
+         patient_level$mean_misclass, method = "spearman")
+
+cor.test(as.numeric(patient_level$baseline_noCav), 
+         patient_level$mean_misclass, method = "spearman")
+
+```
+
+## Clinical covariates
+>> Including all covariates of interest
+
+```{r}
+clin_info <- read.csv('.../metadata3.csv')
+```
+
+### Blood
+#### Matched ROC
+```{r}
+blood_df<-clin_df |>
+  filter(AVISITN %in% c(-1,1,2,4,6,9,12,14))
+blood_covars<-c("ALT_IU.L","AST_U.L","Albumin_g.L","Alkaline.phosphatase_IU.L",
+          "Bilirubin.direct_umol.L","Bilirubin.total_umol.L","Calcium_mmol.L",
+          "Chloride_mmol.L","Creatinine_umol.L","GGT_U.L","Glucose_mmol.L",
+          "Lipase_U.L","Magnesium_mmol.L","Phosphorus_mmol.L",
+          "Potassium_mmol.L","Sodium_mmol.L","Haematocrit_.",
+          "Haemoglobin_g.dL" ,"MCHC_g.dL","MCH_pg.cell",
+          "MCV_fL","lymphocytes_abs_merged_x10E9.l","monocytes_abs_merged_x10E9.l",
+          "neutrophils_abs_merged_x10E9.l", "eosinphils_abs_merged_x10E9.l",
+          "ML_ratio","NL_ratio","Platelet.count_x10E9.L", "NM_ratio","EN_ratio",
+          "GL_ratio","LP_ratio")
+
+sum(is.na(blood_df$EN_ratio))
+
+blood_dfs<-split(blood_df, blood_df$AVISITN)
+row_list<-list()
+```
+
+```{r}
+for (df_name in names(blood_dfs)) {
+  df<-blood_dfs[[df_name]]
+  rows<-list()
+  
+  for (var in blood_covars) {
+    dat<-df|>
+      filter(!is.na(.data[[var]]))
+
+    ## get point estimate
+    roc_val <- get_concord_pairs(dat, "pair_id", var, "label_binary")
+
+    ## get bootstrap
+    #### Pair IDs to exclude the orphan draws
+    complete_pairs <- dat |>
+      group_by(pair_id) |>
+      summarise(n_case = sum(label_binary == 1), n_ctrl = sum(label_binary == 0)) |>
+      filter(n_case == 1 & n_ctrl == 1) |>
+      pull(pair_id)
+      
+    pair_ids <- complete_pairs 
+    
+    B<-1000 # update to 1000 min
+    boot_conc<-numeric(B)
+    
+    for (b in seq_len(B)){
+      boot_pairs<-sample(pair_ids, replace=TRUE)
+      boot_df<-do.call(rbind, lapply(seq_along(boot_pairs), function(i) {
+        p<-boot_pairs[i]
+        rows<-dat[dat$pair_id == p, ]
+        rows$boot_pair_id <-paste0(p, "_rep", i)
+        rows
+        }))
+      
+      boot_conc[b] <-get_concord_pairs(boot_df,"boot_pair_id",var,"label_binary" )
+    }
+    ci_low<-quantile(boot_conc, c(0.025, 0.975))[[1]]
+    ci_high<-quantile(boot_conc, c(0.025, 0.975))[[2]]
+
+    rows[[var]]<-tibble(
+      timepoint = df_name,
+      covariate = var,
+      matched_ROC = roc_val,
+      boot_ci_25 = ci_low,
+      boot_ci_95 = ci_high
+      )
+    
+    }
+  row_list[[df_name]]<-bind_rows(rows)
+
+}
+
+final_df_BLOOD<-bind_rows(row_list)
+```
+
+
+#### C-index plot
+```{r}
+blood_covar_df <-final_df_BLOOD |>
+  mutate(timepoint = factor(timepoint, levels = c('-1','1','2','4','6','9','12','14')))|>
+  arrange(timepoint)|>
+  mutate(panel_type = case_when(
+    covariate %in% c("ALT_IU.L","AST_U.L","Albumin_g.L",
+                     "Alkaline.phosphatase_IU.L","Bilirubin.direct_umol.L",
+                     "Bilirubin.total_umol.L","GGT_U.L") ~ "Liver panel",
+    covariate %in% c("Calcium_mmol.L","Chloride_mmol.L","Creatinine_umol.L",
+                     "Magnesium_mmol.L","Phosphorus_mmol.L","Potassium_mmol.L",
+                     "Sodium_mmol.L") ~ "Renal function & electrolytes",
+    covariate %in% c("Glucose_mmol.L","Lipase_U.L") ~ "Metabolic marker",
+    covariate %in% c("Haematocrit_.","Haemoglobin_g.dL" ,"MCHC_g.dL","MCH_pg.cell",
+          "MCV_fL","lymphocytes_abs_merged_x10E9.l","monocytes_abs_merged_x10E9.l",
+          "neutrophils_abs_merged_x10E9.l","Platelet.count_x10E9.L") ~ "Haematology panel",
+    covariate %in% c("ML_ratio","NL_ratio","NM_ratio","EN_ratio",
+          "ME_ratio","EB_ratio","GL_ratio","LP_ratio") ~ "Derived blood markers"
+  ))
+```
+
+```{r}
+all_covars<-levels(factor(blood_covar_df$covariate))
+colors<-setNames(scales::hue_pal()(length(all_covars)), all_covars)
+blood_covar_df$covariate<-factor(blood_covar_df$covariate, levels=all_covars)
+xs<-split(blood_covar_df, f = blood_covar_df$panel_type)
+```
+
+```{r}
+plot_perf<-function(df, panel_name) {
+  df$covariate<-droplevels(df$covariate)
+  
+  ggplot(df, aes(x=timepoint, y=matched_ROC,color=covariate)) + 
+  geom_pointrange(aes(ymin=boot_ci_25, ymax=boot_ci_95),
+                  position = position_dodge(width = 0.6) )+
+  scale_color_manual(values = colors, drop=FALSE)+
+  scale_y_continuous(name="C-Index")+ 
+  scale_x_discrete(labels = c("Screening","Week 1",
+                              "Week 2","Week 4","Week 6","Week 9",
+                              "Week 12","Week 14"))+
+  labs(color = "Clinical variable", x="Weeks on treatment",
+       subtitle=panel_name) +
+  theme_bw()
+}
+plots<-Map(plot_perf, xs, names(xs))
+clinVar_Cindex<-grid.arrange(grobs=plots)
+```
+
+
+#### Opt-corrected Sens/spec
+```{r}
+row_list<-list()
+
+for (df_name in names(blood_dfs)){
+  df<-blood_dfs[[df_name]]
+  rows<-list()
+  
+  for (var in blood_covars){
+    dat_valid<-df|>
+      filter(!is.na(.data[[var]]))
+  
+    complete_pairs <- dat_valid |>
+      group_by(pair_id) |>
+      summarise(n_case = sum(label_binary == 1), n_ctrl = sum(label_binary == 0), .groups = "drop") |>
+      filter(n_case == 1, n_ctrl == 1) |>
+      pull(pair_id)
+  
+    dat <- dat_valid |>
+      filter(pair_id %in% complete_pairs)
+    
+    ### get apparent values + format into df
+    coords_OG<-get_cutpoint(dat[['label_binary']],dat[[var]])
+      
+    rows[[var]]<-tibble(
+      timepoint = df_name,
+      covariate = var,
+      sens_og = coords_OG$sensitivity,
+      spec_og = coords_OG$specificity
+      )
+    
+    pair_ids <- unique(dat$pair_id)
+    
+    B<-1000
+    boot_conc<-numeric(B)
+    opt_sens<-numeric(B)
+    opt_spec<-numeric(B)
+  
+    for (b in seq_len(B)){
+      boot_pairs<-sample(pair_ids, replace=TRUE)
+      boot_df<-do.call(rbind, lapply(seq_along(boot_pairs), function(i) {
+        p<-boot_pairs[i]
+        rows<-dat[dat$pair_id == p, ]
+        rows$boot_pair_id <-paste0(p, "_rep", i)
+        rows
+        }))
+      
+      coords_boot<-get_cutpoint(boot_df[['label_binary']],boot_df[[var]])
+      thresh<-coords_boot$threshold
+      sens_b<-coords_boot$sensitivity
+      spec_b<-coords_boot$specificity
+    
+      
+      ## in OG data
+      label_thres = ifelse(dat[[var]] > thresh, 1,0)
+      
+      sens_b_OG<-sum(dat$label_binary == 1 & label_thres == 1) / 
+        (sum(dat$label_binary == 1))
+    
+      spec_b_OG<-sum(dat$label_binary == 0 & label_thres == 0) / 
+      (sum(dat$label_binary == 0))
+    
+      
+      diff_sens<-sens_b - sens_b_OG
+      diff_spec<-spec_b - spec_b_OG
+      opt_sens[b]<-diff_sens
+      opt_spec[b]<-diff_spec
+    
+      }
+    opt_sens_tot<-mean(opt_sens)
+    opt_spec_tot<-mean(opt_spec)
+    
+    rows[[var]]<-rows[[var]] |>
+      mutate(sens_opt = opt_sens_tot,
+             spec_opt = opt_spec_tot)
+  }
+  
+  row_list[[df_name]]<-bind_rows(rows)
+
+}
+
+blood_covars_performance_opt<-bind_rows(row_list)
+```
+
+
+```{r}
+#### Get all covariates
+blood_covars_performance_opt <-blood_covars_performance_opt |>
+  mutate(timepoint = factor(timepoint, levels = c('-1','1','2','4','6','9','12','14')))|>
+  arrange(timepoint)
+
+##### Get final results (sens/spec/PPV/NPV)
+prevalence = 8/310 ## number of cases in whole cohort
+
+blood_covars_performance_opt<-blood_covars_performance_opt |>
+  mutate(sens_corr = sens_og - sens_opt, ## for NAs
+         spec_corr = spec_og - spec_opt,
+         PPV = ((sens_corr * prevalence) / ((sens_corr * prevalence) + ((1-spec_corr) * (1-prevalence)))), 
+         NPV = ((spec_corr * (1-prevalence)) / ((spec_corr * (1- prevalence)) + ((1-sens_corr) * prevalence)))
+         ) 
+```
+
+###### Table
+```{r}
+blood_covars_performance_opt |> 
+  dplyr::arrange(covariate) |>
+   mutate(covariate = covariate |>
+           recode_values("ALT_IU.L" ~"ALT (IU/L)",
+                         "AST_U.L" ~" AST (U/L)",
+                         "Albumin_g.L" ~"Albumin (g/L)",
+                         "Alkaline.phosphatase_IU.L" ~"Alkaline phosphatase (IU/L)",
+                         "Bilirubin.direct_umol.L" ~"Direct bilirubin (umol/L)",
+                         "Bilirubin.total_umol.L" ~"Total bilirubin (umol/L)",
+                         "Calcium_mmol.L" ~"Calcium (mmol/L)",
+                         "Chloride_mmol.L" ~"Chloride (mmol/L)",
+                         "Creatinine_umol.L" ~"Creatinine (mmol/L)",
+                         "GGT_U.L" ~"GGT (U/L)",
+                         "Glucose_mmol.L" ~"Glucose (mmol/L)",
+                         "Lipase_U.L" ~" Lipase (U/L)",
+                         "Magnesium_mmol.L" ~"Magnesium (mmol/L)",
+                         "Phosphorus_mmol.L" ~"Phosphorus (mmol/L)",
+                         "Potassium_mmol.L" ~"Potassium (mmol/L)",
+                        "Sodium_mmol.L" ~"Sodium (mmol/L)",
+                        "Haematocrit_." ~"Haematocrit (%)",
+                        "Haemoglobin_g.dL" ~" Haemoglobin (g/dL)",
+                        "MCHC_g.dL" ~"MCHC (g/dL)",
+                        "MCH_pg.cell" ~"MCH (pg/cell)",
+                        "MCV_fL" ~"MCV (fL)",
+                        "lymphocytes_abs_merged_x10E9.l" ~"Absolute lymphocytes (x10^9 L)",
+                        "monocytes_abs_merged_x10E9.l" ~"Absolute monocytes (x10^9 L)",
+                        "neutrophils_abs_merged_x10E9.l" ~" Aboslute neutrophils (x10^9 L)",
+                        "ML_ratio" ~"Monocyte: Lymphocyte ratio",
+                        "NL_ratio" ~"Neutrophil: Lymphocyte ratio",
+                        "NM_ratio" ~"Neutrophil: Monocyte ratio",
+                        "EN_ratio" ~"Eosinophil: Neutrophil ratio",
+                        "ME_ratio" ~"Monocyte: Eosinophil ratio",
+                        "EB_ratio" ~"Eosinophil: Basophil ratio",
+                        "Platelet.count_x10E9.L" ~"Platelet count (x10^9 L)"),
+         timepoint = timepoint |>
+           recode_values(
+             "-1"~"Screening",
+             "1"~"Week 1",
+             "2"~"Week 2",
+             "4"~"Week 4",
+             "6"~"Week 6",
+             "9"~"Week 9",
+             "12"~"Week 12",
+             "14"~"Week 14"
+           )) |>
+  dplyr::rename("Covariate" = covariate,
+              "Visit" = timepoint,
+              "Sensitivity" = sens_corr,
+              "Specificity" = spec_corr) |>
+  select(c(Covariate, Visit, Sensitivity, Specificity, PPV, NPV)) |>
+  gt() |>
+ tab_header(
+   title = md("**Clinical covariate predicitive performance by study visit**"))|>
+  tab_footnote(
+    footnote = "*Calculated using prevalence in the entire trial cohort") |>
+  cols_align(align="center") |>
+  cols_label(
+    PPV = md("PPV*"),
+    NPV = md("NPV*")
+  )|>
+  fmt_number(decimals = 3)
+```
+
+###### Plot
+```{r}
+ggplot(blood_covars_performance_opt, aes(x=timepoint, group=covariate)) + 
+  geom_line(aes(y=PPV, color="cornflowerblue"))+
+  geom_line(aes(y=NPV, color="orange2")) + 
+  scale_y_continuous(
+    name = "Positive predictive value",
+   sec.axis = sec_axis(~.*1,name = "Negative predictive value")
+ ) +
+  scale_color_manual(values=c("cornflowerblue","orange2"),
+                     labels=c("PPV", "NPV")) +
+  theme_bw() +
+  labs(color="Metric",
+       x="Weeks on treatment",
+      title = "Blood marker PPV and NPV over time") +
+  facet_wrap(~covariate,
+             labeller = as_labeller(c("ALT_IU.L" ="ALT (IU/L)",
+                         "AST_U.L" =" AST (U/L)",
+                         "Albumin_g.L" ="Albumin (g/L)",
+                         "Alkaline.phosphatase_IU.L" ="Alk phos (IU/L)",
+                         "Bilirubin.direct_umol.L" ="Direct bilirubin (umol/L)",
+                         "Bilirubin.total_umol.L" ="Total bilirubin (umol/L)",
+                         "Calcium_mmol.L" ="Calcium (mmol/L)",
+                         "Chloride_mmol.L" ="Chloride (mmol/L)",
+                         "Creatinine_umol.L" ="Creatinine (mmol/L)",
+                         "GGT_U.L" ="GGT (U/L)",
+                         "Glucose_mmol.L" ="Glucose (mmol/L)",
+                         "Lipase_U.L" =" Lipase (U/L)",
+                         "Magnesium_mmol.L" ="Magnesium (mmol/L)",
+                         "Phosphorus_mmol.L" ="Phosphorus (mmol/L)",
+                         "Potassium_mmol.L" ="Potassium (mmol/L)",
+                        "Sodium_mmol.L" ="Sodium (mmol/L)",
+                        "Haematocrit_." ="Haematocrit (%)",
+                        "Haemoglobin_g.dL" =" Haemoglobin (g/dL)",
+                        "MCHC_g.dL" ="MCHC (g/dL)",
+                        "MCH_pg.cell" ="MCH (pg/cell)",
+                        "MCV_fL" ="MCV (fL)",
+                        "lymphocytes_abs_merged_x10E9.l" ="Lymph count(x10^9 L)",
+                        "monocytes_abs_merged_x10E9.l" ="Monocyte count(x10^9 L)",
+                        "neutrophils_abs_merged_x10E9.l" ="Neut count (x10^9 L)",
+                        "eosinphils_abs_merged_x10E9.l" = "Eosin count (x10^9 L)",
+                        "ML_ratio" ="ML ratio",
+                        "NL_ratio" ="NL ratio",
+                        "NM_ratio" ="NM ratio",
+                        "EN_ratio" ="EN ratio",
+                        "ME_ratio" ="ME ratio",
+                        "EB_ratio" ="EB ratio",
+                        "LP_ratio " = "LP ratio",
+                        "GL_ratio" = "GL ratio",
+                        "Platelet.count_x10E9.L" ="Platelet count (x10^9 L)")))
+```
+
+
+### Vital signs / Demographics
+```{r}
+dem_df<-clin_df |>
+  filter(AVISITN != -1)
+
+dem_covars<-c("vs_hr","bmi") 
+dem_dfs<-split(dem_df, dem_df$AVISITN)
+all_results<-list()
+row_list<-list()
+```
+
+
+###### Alternative function
+```{r}
+get_concord_pairs_BMI<- function(df,pair_id, var, label) {
+  if (var == 'bmi') {
+      paired <- df|>
+    group_by(.data[[pair_id]]) |>
+    mutate(n_case = sum(.data[[label]] == 1),
+           n_ctrl = sum(.data[[label]] == 0)) |>
+    filter(n_case == 1 & n_ctrl == 1) |>
+    summarise(d = .data[[var]][.data[[label]]== 1] -
+                .data[[var]][.data[[label]] == 0])
+  mean(paired$d < 0) + 0.5 * mean(paired$d == 0)
+  } else {
+    paired <- df|>
+    group_by(.data[[pair_id]]) |>
+    mutate(n_case = sum(.data[[label]] == 1),
+           n_ctrl = sum(.data[[label]] == 0)) |>
+    filter(n_case == 1 & n_ctrl == 1) |>
+    summarise(d = .data[[var]][.data[[label]]== 1] -
+                .data[[var]][.data[[label]] == 0])
+  mean(paired$d > 0) + 0.5 * mean(paired$d == 0)
+  }
+} 
+```
+
+#### Matched ROC
+```{r}
+for (df_name in names(dem_dfs)) {
+  df<-dem_dfs[[df_name]]
+  rows<-list()
+  
+  for (var in dem_covars) {
+    dat<-df|>
+      filter(!is.na(.data[[var]]))
+
+    ## get point estimate
+    roc_val <- get_concord_pairs_BMI(dat, "pair_id", var, "label_binary")
+
+    ## get bootstrap
+    #### Pair IDs to exclude the orphan draws
+    complete_pairs <- dat |>
+      group_by(pair_id) |>
+      summarise(n_case = sum(label_binary == 1), n_ctrl = sum(label_binary == 0)) |>
+      filter(n_case == 1 & n_ctrl == 1) |>
+      pull(pair_id)
+      
+    pair_ids <- complete_pairs 
+    
+    B<-1000
+    boot_conc<-numeric(B)
+    
+    for (b in seq_len(B)){
+      boot_pairs<-sample(pair_ids, replace=TRUE)
+      boot_df<-do.call(rbind, lapply(seq_along(boot_pairs), function(i) {
+        p<-boot_pairs[i]
+        rows<-dat[dat$pair_id == p, ]
+        rows$boot_pair_id <-paste0(p, "_rep", i)
+        rows
+        }))
+      
+      boot_conc[b] <-get_concord_pairs_BMI(boot_df,"boot_pair_id",var,"label_binary" )
+    }
+    ci_low<-quantile(boot_conc, c(0.025, 0.975))[[1]]
+    ci_high<-quantile(boot_conc, c(0.025, 0.975))[[2]]
+
+    rows[[var]]<-tibble(
+      timepoint = df_name,
+      covariate = var,
+      matched_ROC = roc_val,
+      boot_ci_25 = ci_low,
+      boot_ci_95 = ci_high
+      )
+    
+    }
+  row_list[[df_name]]<-bind_rows(rows)
+
+}
+
+final_df_DEMO<-bind_rows(row_list)
+```
+
+#### C-index plot
+```{r}
+table(final_df_DEMO$timepoint)
+final_df_DEMO$timepoint<- gdata::reorder.factor(
+    final_df_DEMO$timepoint,
+    new.order = c('-1','0','1','2','3','4','5','6','7','8','9','10','11','12','14',
+                  '17','22','26'))
+```
+
+
+```{r}
+col_palette = c(brewer.pal(8,"Dark2")[1:2])
+
+p<-ggplot(final_df_DEMO, aes(x=timepoint, y=matched_ROC,color=covariate)) + 
+  geom_pointrange(aes(ymin=boot_ci_25, ymax=boot_ci_95),
+                  position = position_dodge(width = 0.5) )+
+  labs(title = "C-index for within-pairs concordance")+
+  scale_y_continuous(name="C-Index")+
+  scale_color_manual(
+    values = col_palette,
+    labels=c("BMI", "Heart rate")
+  ) + 
+  labs(color = "Vital signs", x="Weeks on treatment") +
+  theme_minimal()
+```
+
+######## Clinical covs all together
+
+```{r}
+final_df_COVS<-bind_rows(final_df_BLOOD, final_df_DEMO)
+
+clin_covar_df <-final_df_COVS |>
+  mutate(timepoint = as.factor(timepoint))|>
+  arrange(timepoint)|>
+  mutate(panel_type = case_when(
+    covariate %in% c("ALT_IU.L","AST_U.L","Albumin_g.L",
+                     "Alkaline.phosphatase_IU.L","Bilirubin.direct_umol.L",
+                     "Bilirubin.total_umol.L","GGT_U.L") ~ "Liver panel",
+    covariate %in% c("Calcium_mmol.L","Chloride_mmol.L","Creatinine_umol.L",
+                     "Magnesium_mmol.L","Phosphorus_mmol.L","Potassium_mmol.L",
+                     "Sodium_mmol.L") ~ "Renal function & electrolytes",
+    covariate %in% c("Glucose_mmol.L","Lipase_U.L") ~ "Metabolic marker",
+    covariate %in% c("Haematocrit_.","Haemoglobin_g.dL" ,"MCHC_g.dL","MCH_pg.cell",
+          "MCV_fL","lymphocytes_abs_merged_x10E9.l","monocytes_abs_merged_x10E9.l",
+          "neutrophils_abs_merged_x10E9.l","Platelet.count_x10E9.L") ~ "Haematology panel",
+    covariate %in% c("ML_ratio","NL_ratio","NM_ratio","EN_ratio",
+          "ME_ratio","EB_ratio","GL_ratio","LP_ratio") ~ "Derived blood markers",
+    covariate %in% c("bmi", "vs_hr") ~ "Vital signs"
+    ),
+    covariate = covariate |>
+                        recode_values(
+                          "ALT_IU.L" ~"ALT (IU/L)",
+                         "AST_U.L" ~"AST (U/L)",
+                         "Albumin_g.L" ~"Albumin (g/L)",
+                         "Alkaline.phosphatase_IU.L" ~"Alkaline phosphatase (IU/L)",
+                         "Bilirubin.direct_umol.L" ~"Direct bilirubin (umol/L)",
+                         "Bilirubin.total_umol.L" ~"Total bilirubin (umol/L)",
+                         "Calcium_mmol.L" ~"Calcium (mmol/L)",
+                         "Chloride_mmol.L" ~"Chloride (mmol/L)",
+                         "Creatinine_umol.L" ~"Creatinine (mmol/L)",
+                         "GGT_U.L" ~"GGT (U/L)",
+                         "Glucose_mmol.L" ~"Glucose (mmol/L)",
+                         "Lipase_U.L" ~"Lipase (U/L)",
+                         "Magnesium_mmol.L" ~"Magnesium (mmol/L)",
+                         "Phosphorus_mmol.L" ~"Phosphorus (mmol/L)",
+                         "Potassium_mmol.L" ~"Potassium (mmol/L)",
+                        "Sodium_mmol.L" ~"Sodium (mmol/L)",
+                        "Haematocrit_." ~"Haematocrit (%)",
+                        "Haemoglobin_g.dL" ~"Haemoglobin (g/dL)",
+                        "MCHC_g.dL" ~"MCHC (g/dL)",
+                        "MCH_pg.cell" ~"MCH (pg/cell)",
+                        "MCV_fL" ~"MCV (fL)",
+                        "lymphocytes_abs_merged_x10E9.l" ~"Absolute lymphocytes (x10^9 L)",
+                        "monocytes_abs_merged_x10E9.l" ~"Absolute monocytes (x10^9 L)",
+                        "neutrophils_abs_merged_x10E9.l" ~"Absolute neutrophils (x10^9 L)",
+                        "ML_ratio" ~"Monocyte: Lymphocyte ratio",
+                        "NL_ratio" ~"Neutrophil: Lymphocyte ratio",
+                        "NM_ratio" ~"Neutrophil: Monocyte ratio",
+                        "EN_ratio" ~"Eosinophil: Neutrophil ratio",
+                        "ME_ratio" ~"Monocyte: Eosinophil ratio",
+                        "EB_ratio" ~"Eosinophil: Basophil ratio",
+                        "Platelet.count_x10E9.L" ~"Platelet count (x10^9 L)",
+                        "vs_hr" ~"Heart rate (bpm)",
+                        "bmi" ~"BMI (kg/m^2)"))
+```
+
+```{r}
+all_covars<-levels(factor(clin_covar_df$covariate))
+colors<-setNames(scales::hue_pal()(length(all_covars)), all_covars)
+clin_covar_df$covariate<-factor(clin_covar_df$covariate, levels=all_covars)
+xs<-split(clin_covar_df, f = clin_covar_df$panel_type)
+```
+
+```{r}
+plot_perf<-function(df, panel_name) {
+  if (panel_name == "Vital signs" ){
+    df$covariate<-droplevels(df$covariate)
+    
+    ggplot(df, aes(x=timepoint, y=matched_ROC,color=covariate)) + 
+    geom_pointrange(aes(ymin=boot_ci_25, ymax=boot_ci_95),
+                    position = position_dodge(width = 0.6) )+
+    scale_color_manual(values = colors, drop=FALSE)+
+    scale_y_continuous(name="C-Index")+ 
+    scale_x_discrete(labels = c("Screening","Week 1",
+                              "Week 2","Week 3","Week 4",
+                              "Week 5","Week 6","Week 7",
+                              "Week 8","Week 9", "Week 10", "Week 11",
+                              "Week 12","Week 14", "Week 17","Week 22","Week 26"))+
+    labs(color = "Clinical variable", x="Weeks on treatment",
+         subtitle=panel_name) +
+    theme_bw()
+  }
+  else {
+      df$covariate<-droplevels(df$covariate)
+      ggplot(df, aes(x=timepoint, y=matched_ROC,color=covariate)) + 
+      geom_pointrange(aes(ymin=boot_ci_25, ymax=boot_ci_95),
+                      position = position_dodge(width = 0.6) )+
+      scale_color_manual(values = colors, drop=FALSE
+                        )+
+      scale_y_continuous(name="C-Index")+ 
+      scale_x_discrete(labels = c("Screening","Week 1",
+                                  "Week 2","Week 4",
+                                  "Week 6","Week 9", 
+                                  "Week 12","Week 14"))+
+      labs(color = "Clinical variable", x="Weeks on treatment",
+           subtitle=panel_name) +
+      theme_bw()
+  }
+}
+plots<-Map(plot_perf, xs, names(xs))
+clinVar_Cindex<-grid.arrange(grobs=plots)
+```
+
+
+###### Lung params
+```{r}
+colnames(clin_df)
+bl_lung<-clin_df |>
+  select(USUBJID,lung_eff,no_cav,AVISITN,pair_id,label_binary) |>
+  filter(AVISITN == -1)
+
+```
+
+```{r}
+lung.logit<-clogit(label_binary ~ lung_eff + strata(pair_id),
+              data = bl_lung)  # one row per patient
+summary(lung.logit)
+```
+
+```{r}
+cav.logit<-clogit(label_binary ~ no_cav + strata(pair_id),
+              data = bl_lung)  # one row per patient
+summary(cav.logit)
+```
+
+#### Opt-corrected Sens/spec
+```{r}
+row_list<-list()
+
+for (df_name in names(dem_dfs)){
+  df<-dem_dfs[[df_name]]
+  rows<-list()
+  
+  for (var in dem_covars){
+    dat_valid<-df|>
+      filter(!is.na(.data[[var]]))
+  
+    complete_pairs <- dat_valid |>
+      group_by(pair_id) |>
+      summarise(n_case = sum(label_binary == 1), n_ctrl = sum(label_binary == 0), .groups = "drop") |>
+      filter(n_case == 1, n_ctrl == 1) |>
+      pull(pair_id)
+  
+    dat <- dat_valid |>
+      filter(pair_id %in% complete_pairs)
+    
+    ### get apparent values + format into df
+    coords_OG<-get_cutpoint(dat[['label_binary']],dat[[var]])
+      
+    rows[[var]]<-tibble(
+      timepoint = df_name,
+      covariate = var,
+      sens_og = coords_OG$sensitivity,
+      spec_og = coords_OG$specificity
+      )
+    
+    pair_ids <- unique(dat$pair_id)
+    
+    B<-1000
+    boot_conc<-numeric(B)
+    opt_sens<-numeric(B)
+    opt_spec<-numeric(B)
+  
+    for (b in seq_len(B)){
+      boot_pairs<-sample(pair_ids, replace=TRUE)
+      boot_df<-do.call(rbind, lapply(seq_along(boot_pairs), function(i) {
+        p<-boot_pairs[i]
+        rows<-dat[dat$pair_id == p, ]
+        rows$boot_pair_id <-paste0(p, "_rep", i)
+        rows
+        }))
+      
+      coords_boot<-get_cutpoint(boot_df[['label_binary']],boot_df[[var]])
+      thresh<-coords_boot$threshold
+      sens_b<-coords_boot$sensitivity
+      spec_b<-coords_boot$specificity
+    
+      
+      ## in OG data
+      label_thres = ifelse(dat[[var]] > thresh, 1,0)
+      
+      sens_b_OG<-sum(dat$label_binary == 1 & label_thres == 1) / 
+        (sum(dat$label_binary == 1))
+    
+      spec_b_OG<-sum(dat$label_binary == 0 & label_thres == 0) / 
+      (sum(dat$label_binary == 0))
+    
+      
+      diff_sens<-sens_b - sens_b_OG
+      diff_spec<-spec_b - spec_b_OG
+      opt_sens[b]<-diff_sens
+      opt_spec[b]<-diff_spec
+    
+      }
+    opt_sens_tot<-mean(opt_sens)
+    opt_spec_tot<-mean(opt_spec)
+    
+    rows[[var]]<-rows[[var]] |>
+      mutate(sens_opt = opt_sens_tot,
+             spec_opt = opt_spec_tot)
+  }
+  
+  row_list[[df_name]]<-bind_rows(rows)
+
+}
+
+dem_covars_performance_opt<-bind_rows(row_list)
+```
+
+```{r}
+dem_covars_performance_opt$timepoint<- gdata::reorder.factor(
+    dem_covars_performance_opt$timepoint,
+    new.order = c('-1','0','1','2','3','4','5','6','7','8','9','10','11','12','14',
+                  '17','22','26'))
+
+##### Get final results (sens/spec/PPV/NPV)
+prevalence = 8/310 ## number of cases in whole cohort
+
+dem_covars_performance_opt<-dem_covars_performance_opt |>
+  mutate(sens_corr = sens_og - sens_opt, ## for NAs
+         spec_corr = spec_og - spec_opt,
+         PPV = ((sens_corr * prevalence) / ((sens_corr * prevalence) + ((1-spec_corr) * (1-prevalence)))), 
+         NPV = ((spec_corr * (1-prevalence)) / ((spec_corr * (1- prevalence)) + ((1-sens_corr) * prevalence)))
+         ) 
+```
+
+###### Table
+```{r}
+dem_covars_performance_opt |> 
+  dplyr::arrange(covariate) |>
+  mutate(covariate = covariate |>
+           recode_values("vs_hr" ~"Heart rate (bpm)",
+                        "bmi" ~"BMI (kg/m^2)"),
+         timepoint = timepoint |>
+           recode_values(
+             "-1"~"Screening",
+             "0"~"Baseline",
+             "1"~"Week 1",
+             "2"~"Week 2",
+             "3"~"Week 3",
+             "4"~"Week 4",
+             "5"~"Week 5",
+             "6"~"Week 6",
+             "7"~"Week 7",
+             "8"~"Week 8",
+             "9"~"Week 9",
+             "10"~"Week 10",
+             "11"~"Week 11",
+             "12"~"Week 12",
+             "14"~"Week 14",
+             "17"~"Week 17",
+             "22"~"Week 22",
+             "26"~"Week 26"
+           )) |>
+  dplyr::rename("Covariate" = covariate,
+              "Visit" = timepoint,
+              "Sensitivity" = sens_corr,
+              "Specificity" = spec_corr) |>
+  select(c(Covariate, Visit, Sensitivity, Specificity, PPV, NPV)) |>
+  gt() |>
+ tab_header(
+   title = md("**Clinical covariate predicitive performance by study visit**"))|>
+  tab_footnote(
+    footnote = "*Calculated using prevalence in the entire trial cohort") |>
+  cols_align(align="center") |>
+  cols_label(
+    PPV = md("PPV*"),
+    NPV = md("NPV*")
+  )|>
+  fmt_number(decimals = 3)
+```
+
+###### Plot
+```{r}
+ggplot(dem_covars_performance_opt, aes(x=timepoint, group=covariate)) + 
+  geom_line(aes(y=PPV, color="cornflowerblue"))+
+  geom_line(aes(y=NPV, color="orange2")) + 
+  scale_y_continuous(
+    name = "Positive predictive value",
+   sec.axis = sec_axis(~.*1,name = "Negative predictive value")
+ ) +
+  scale_color_manual(values=c("cornflowerblue","orange2"),
+                     labels=c("PPV", "NPV")) +
+  theme_bw() +
+  labs(color="Metric",
+       x="Weeks on treatment",
+      title = "BMI and Heart rate PPV and NPV over time") + 
+  facet_wrap(~covariate,
+             labeller = as_labeller(c(
+               "bmi" = "BMI (kg/m2)",
+               "vs_hr" = "Heart rate (BPM)"
+             )))
+```
+
+
+## GSEA scores
+### Data formatting
+```{r}
+gsea_df<-read.csv('/data/SingScores.csv') 
+
+gsea_scores<-gsea_df|>
+    mutate(label_binary = case_when(
+        label == "relapse" ~ 1,
+        label == "control" ~ 0
+      ))
+```
+
+
+```{r}
+sigs_GSEA<-c("Manneh_RES_7")
+dfs_gsea<-split(gsea_scores,gsea_scores$tp)
+rows_list<-list()
+```
+
+
+```{r}
+for (df_name in names(dfs_gsea)) {
+  df<-dfs_gsea[[df_name]]
+  rows<-list()
+  
+  for (sig in sigs_GSEA) {
+    dat<-df|>
+      filter(!is.na(.data[[sig]]))
+
+    ## get point estimate
+    roc_val <- get_concord_pairs(dat, "pair_id", sig, "label_binary")
+
+    ## get bootstrap
+    #### Pair IDs to exclude the orphan draws
+    complete_pairs <- dat |>
+      group_by(pair_id) |>
+      summarise(n_case = sum(label_binary == 1), n_ctrl = sum(label_binary == 0)) |>
+      filter(n_case == 1 & n_ctrl == 1) |>
+      pull(pair_id)
+      
+    pair_ids <- complete_pairs 
+    
+    B<-2000
+    boot_conc<-numeric(B)
+    
+    for (b in seq_len(B)){
+      boot_pairs<-sample(pair_ids, replace=TRUE)
+      boot_df<-do.call(rbind, lapply(seq_along(boot_pairs), function(i) {
+        p<-boot_pairs[i]
+        rows<-dat[dat$pair_id == p, ]
+        rows$boot_pair_id <-paste0(p, "_rep", i)
+        rows
+        }))
+      
+      boot_conc[b] <-get_concord_pairs(boot_df,"boot_pair_id",sig,"label_binary" )
+    }
+    ci_low<-quantile(boot_conc, c(0.025, 0.975))[[1]]
+    ci_high<-quantile(boot_conc, c(0.025, 0.975))[[2]]
+
+    rows[[sig]]<-tibble(
+      timepoint = df_name,
+      signature = sig,
+      matched_ROC = roc_val,
+      boot_ci_25 = ci_low,
+      boot_ci_95 = ci_high
+      )
+    
+    }
+  rows_list[[df_name]]<-bind_rows(rows)
+
+}
+
+
+final_df_GSEA<-bind_rows(rows_list)
+```
+
+
+
+#### C-index plot
+```{r}
+final_df_GSEA$timepoint<- gdata::reorder.factor(
+    final_df_GSEA$timepoint,
+    new.order = c('0','1','2','9','14', '26'))
+```
+
+```{r}
+col_palette = c(brewer.pal(8, "Dark2")[1:7])
+ggplot(final_df_GSEA[final_df_GSEA$signature == "Manneh_RES_7", ],
+          aes(x=timepoint,y=matched_ROC,color=signature)) +
+  geom_pointrange(aes(ymin=boot_ci_25, ymax=boot_ci_95),
+                  position=position_dodge(width=0.5))+
+  labs(title = "C-index for within-pairs concordance",
+       subtitle = "Secondary analysis: Transcriptomic GSEA scores",
+       color="GSEA Signature", x="Weeks on treatment") +
+  scale_y_continuous(name="C-index")+
+  scale_color_manual(
+    values=col_palette,
+    labels=c("Manneh-7")) +
+  scale_x_discrete(labels=c("Baseline", "Week 1",
+                            "Week 2", "Week 9",
+                            "Week 14", "Week 26")) +
+  theme_minimal()
+```
+
+
+### Opt-corrected Sens/spec
+```{r}
+row_list<-list()
+
+for (df_name in names(dfs_gsea)){
+  df<-dfs_gsea[[df_name]]
+  rows<-list()
+  
+  for (sig in sigs_GSEA){
+    dat_valid<-df|>
+      filter(!is.na(.data[[sig]]))
+  
+    complete_pairs <- dat_valid |>
+      group_by(pair_id) |>
+      summarise(n_case = sum(label_binary == 1), n_ctrl = sum(label_binary == 0), .groups = "drop") |>
+      filter(n_case == 1, n_ctrl == 1) |>
+      pull(pair_id)
+  
+    dat <- dat_valid |>
+      filter(pair_id %in% complete_pairs)
+    
+    
+    ### get apparent values + format into df
+    coords_OG<-get_cutpoint(dat[['label_binary']],dat[[sig]])
+      
+    rows[[sig]]<-tibble(
+      timepoint = df_name,
+      signature = sig,
+      sens_og = coords_OG$sensitivity,
+      spec_og = coords_OG$specificity
+      )
+    
+    pair_ids <- unique(dat$pair_id)
+    
+    B<-1000
+    boot_conc<-numeric(B)
+    opt_sens<-numeric(B)
+    opt_spec<-numeric(B)
+  
+    for (b in seq_len(B)){
+      boot_pairs<-sample(pair_ids, replace=TRUE)
+      boot_df<-do.call(rbind, lapply(seq_along(boot_pairs), function(i) {
+        p<-boot_pairs[i]
+        rows<-dat[dat$pair_id == p, ]
+        rows$boot_pair_id <-paste0(p, "_rep", i)
+        rows
+        }))
+      
+      coords_boot<-get_cutpoint(boot_df[['label_binary']],boot_df[[sig]])
+      thresh<-coords_boot$threshold
+      sens_b<-coords_boot$sensitivity
+      spec_b<-coords_boot$specificity
+    
+      
+      ## in OG data
+      label_thres = ifelse(dat[[sig]] > thresh, 1,0)
+      
+      sens_b_OG<-sum(dat$label_binary == 1 & label_thres == 1) / 
+        (sum(dat$label_binary == 1))
+    
+      spec_b_OG<-sum(dat$label_binary == 0 & label_thres == 0) / 
+      (sum(dat$label_binary == 0))
+    
+      
+      diff_sens<-sens_b - sens_b_OG
+      diff_spec<-spec_b - spec_b_OG
+      opt_sens[b]<-diff_sens
+      opt_spec[b]<-diff_spec
+    
+      }
+    opt_sens_tot<-mean(opt_sens)
+    opt_spec_tot<-mean(opt_spec)
+    
+    rows[[sig]]<-rows[[sig]] |>
+      mutate(sens_opt = opt_sens_tot,
+             spec_opt = opt_spec_tot)
+  }
+  
+  row_list[[df_name]]<-bind_rows(rows)
+
+}
+
+GSEAsig_performance_opt<-bind_rows(row_list)
+```
+
+
+```{r}
+#### Get all signatures
+GSEAsig_performance_opt$timepoint<- gdata::reorder.factor(
+    GSEAsig_performance_opt$timepoint,
+    new.order = c('0','1','2','9','14', '26'))
+
+##### Get final results (sens/spec/PPV/NPV)
+prevalence = 8/310 ## number of cases in whole cohort
+
+GSEAsig_performance_opt<-GSEAsig_performance_opt |>
+  mutate(sens_corr = sens_og - sens_opt, ## for NAs
+         spec_corr = spec_og - spec_opt,
+         PPV = ((sens_corr * prevalence) / ((sens_corr * prevalence) + ((1-spec_corr) * (1-prevalence)))), 
+         NPV = ((spec_corr * (1-prevalence)) / ((spec_corr * (1- prevalence)) + ((1-sens_corr) * prevalence)))
+         ) 
+```
+
+###### Table
+```{r}
+GSEAsig_performance_opt |> 
+  dplyr::arrange(signature) |>
+  mutate(timepoint = timepoint |>
+           recode_values(
+             "0"~"Week 0",
+             "1"~"Week 1",
+             "2"~"Week 2",
+             "9"~"Week 9",
+             "14"~"Week 14",
+             "26"~"Week 26"
+           )) |>
+  dplyr::rename("Signature" = signature,
+              "Visit" = timepoint,
+              "Sensitivity" = sens_corr,
+              "Specificity" = spec_corr) |>
+  select(c(Signature, Visit, Sensitivity, Specificity, PPV, NPV)) |>
+  gt() |>
+ tab_header(
+   title = md("**Transcriptomic signature GSEA scores predicitive performance by study visit**"))|>
+  tab_footnote(
+    footnote = "*Calculated using prevalence in the entire trial cohort") |>
+  cols_align(align="center") |>
+  cols_label(
+    PPV = md("PPV*"),
+    NPV = md("NPV*")
+  )|>
+  fmt_number(decimals = 3)
+
+```
+
+###### Plot 
+```{r}
+ggplot(GSEAsig_performance_opt[GSEAsig_performance_opt$signature == "Manneh_RES_7", ], 
+          aes(x=timepoint, group=signature)) + 
+  geom_line(aes(y=PPV, color="cornflowerblue"))+
+  geom_line(aes(y=NPV, color="orange2")) + 
+  scale_y_continuous(
+    name = "Positive predictive value",
+   sec.axis = sec_axis(~.*1,name = "Negative predictive value")
+ ) +
+  scale_color_manual(values=c("cornflowerblue","orange2"),
+                     labels=c("PPV", "NPV")) +
+  theme_bw() +
+  labs(color="Metric",
+       x = "Weeks on treatment",
+       title = "Transcriptomic signature GSEA score PPV and NPV over time") + 
+  facet_wrap(~signature,
+             labeller = as_labeller(c("Manneh_RES_7" = "Manneh-7"))) 
+```
+
+
+# Multivariable clogit models
+```{r}
+df26_cov<-df_comb |>
+  select(c(USUBJID,AVISITN,label,Long_10,Sweeney_Add,Zak_RISK_16,bmi)) |>
+  mutate(label_binary = case_when(
+        label == "relapse" ~ 1,
+        label == "control" ~ 0
+      )) |>
+  mutate(matchedset = pair_id)|>
+  filter(AVISITN == 26)
+```
+
+#### Week 26 - Ordinary Conditional LogReg (not penalised)
+
+##### Sweeney
+###### Alone
+```{r}
+w26SW.logit<-clogit(label_binary ~ Sweeney_Add + strata(pair_id), df26_cov)
+summary(w26SW.logit) ### converges
+w26SW.logit$concordance
+```
+
+```{r}
+beta<-coef(w26SW.logit)
+covariates <- c("Sweeney_Add")
+X <- as.matrix(df26_cov[, covariates])
+df26_cov$lp_Sig <- as.numeric(X %*% beta[covariates])
+```
+
+###### BMI
+```{r}
+w26SWBMI.logit<-clogit(label_binary ~ Sweeney_Add + bmi + strata(pair_id), df26_cov)
+summary(w26SWBMI.logit) ### converges
+w26SWBMI.logit$concordance
+```
+
+```{r}
+beta<-coef(w26SWBMI.logit)
+covariates <- c("Sweeney_Add","bmi")
+X <- as.matrix(df26_cov[, covariates])
+df26_cov$lp_SigBMI <- as.numeric(X %*% beta[covariates])
+```
+
+##### Run loop
+```{r}
+complete_pairs <- df26_cov |>
+  group_by(pair_id) |>
+  summarise(n_case = sum(label_binary == 1), n_ctrl = sum(label_binary == 0)) |>
+  filter(n_case == 1 & n_ctrl == 1) |>
+  pull(pair_id)
+  
+pair_ids <- complete_pairs 
+
+lp_list<-c("lp_Sig","lp_SigBMI")
+```
+
+
+```{r}
+B<-2000
+s_rows<-c()
+for (lp in lp_list) {
+
+  boot_conc<-numeric(B)
+
+  for (b in seq_len(B)) {
+    boot_pairs<-sample(pair_ids, replace=TRUE)
+    boot_df<-do.call(rbind, lapply(seq_along(boot_pairs), function(i) {
+      p<-boot_pairs[i]
+      rows<-df26_cov[df26_cov$pair_id == p, ]
+      rows$boot_pair_id <-paste0(p, "_rep", i)
+      rows
+      }))
+    
+   boot_conc[b] <-get_concord_pairs(boot_df,"boot_pair_id",lp,"label_binary" )
+   ci_low<-quantile(boot_conc, c(0.025, 0.975))[[1]]
+   ci_high<-quantile(boot_conc, c(0.025, 0.975))[[2]]
+   mean_est <-mean(boot_conc)
+
+  }
+  s_rows[[lp]]<-tibble(
+    signature = "Sweeney-3",
+    predictors = lp,
+    matched_ROC = mean_est,
+    boot_ci_25 = ci_low,
+    boot_ci_95 = ci_high
+  )
+ 
+}
+Sweeney_bootstrap<-bind_rows(s_rows)
+Sweeney_bootstrap
+```
+
+
+##### Long-10
+###### Alone
+```{r}
+w26Long.logit<-clogit(label_binary ~ Long_10 + strata(pair_id), df26_cov)
+summary(w26Long.logit) ### converges
+w26Long.logit$concordance
+
+w26Long.logit<-clogitf(label_binary ~ Long_10 + bmi, data = df26_cov, pl=TRUE)
+summary(w26Long.logit) ### converges
+```
+
+```{r}
+beta<-coef(w26Long.logit)
+covariates <- c("Long_10")
+X <- as.matrix(df26_cov[, covariates])
+df26_cov$lp_Sig <- as.numeric(X %*% beta[covariates])
+```
+
+###### BMI
+```{r}
+w26LongBMI.logit<-clogit(label_binary ~ Long_10 + bmi + strata(pair_id), df26_cov)
+summary(w26LongBMI.logit) 
+w26LongBMI.logit$concordance
+```
+
+```{r}
+beta<-coef(w26LongBMI.logit)
+covariates <- c("Long_10","bmi")
+X <- as.matrix(df26_cov[, covariates])
+df26_cov$lp_SigBMI <- as.numeric(X %*% beta[covariates])
+```
+
+
+##### Run loop
+```{r}
+complete_pairs <- df26_cov |>
+  group_by(pair_id) |>
+  summarise(n_case = sum(label_binary == 1), n_ctrl = sum(label_binary == 0)) |>
+  filter(n_case == 1 & n_ctrl == 1) |>
+  pull(pair_id)
+  
+pair_ids <- complete_pairs 
+
+lp_list<-c("lp_Sig","lp_SigBMI")
+```
+
+
+```{r}
+B<-2000
+l_rows<-c()
+for (lp in lp_list) {
+
+  boot_conc<-numeric(B)
+
+  for (b in seq_len(B)) {
+    boot_pairs<-sample(pair_ids, replace=TRUE)
+    boot_df<-do.call(rbind, lapply(seq_along(boot_pairs), function(i) {
+      p<-boot_pairs[i]
+      rows<-df26_cov[df26_cov$pair_id == p, ]
+      rows$boot_pair_id <-paste0(p, "_rep", i)
+      rows
+      }))
+    
+   boot_conc[b] <-get_concord_pairs(boot_df,"boot_pair_id",lp,"label_binary" )
+   ci_low<-quantile(boot_conc, c(0.025, 0.975))[[1]]
+   ci_high<-quantile(boot_conc, c(0.025, 0.975))[[2]]
+   mean_est <-mean(boot_conc)
+
+  }
+  l_rows[[lp]]<-tibble(
+    signature = "Long-10",
+    predictors = lp,
+    matched_ROC = mean_est,
+    boot_ci_25 = ci_low,
+    boot_ci_95 = ci_high
+  )
+ 
+}
+Long_bootstrap<-bind_rows(l_rows)
+Long_bootstrap
+```
+
+
+#### Plot
+```{r}
+bootstrap_all<-bind_rows(Sweeney_bootstrap,Long_bootstrap)
+
+bootstrap_all$signature<-gdata::reorder.factor(
+    bootstrap_all$signature,
+    new.order = c('Sweeney-3', 'Long-10'))
+bootstrap_all
+```
+
+
+```{r}
+col_palette = c(brewer.pal(8,"Pastel1")[1:8])
+
+p<-ggplot(bootstrap_all, aes(x=predictors, y=matched_ROC, fill=predictors))+
+  geom_bar(stat="identity") +
+  geom_errorbar(aes(ymin=boot_ci_25, ymax=boot_ci_95), width=.2,
+                position=position_dodge(.9)) +
+  theme_bw()+
+  labs(title = "Bootstrapped C-index with percentile CIs for different feature sets",
+       fill = "Features",
+       y = "C-index",
+       x= "Models") +
+  scale_x_discrete(labels= c("Signature", "+ BMI", "+ HR", "+ MLR")) +
+  scale_fill_manual(
+    values= col_palette,
+    labels=c('Signature',
+             'Signature + BMI')
+  ) +
+  facet_wrap(~signature,
+             labeller = as_labeller(c('Sweeney-3' = "Sweeney-3",
+                                      'Long-10' = "Long-10")))
+
+
+```
+
+
+#### Week 26 - Firth's Conditional LogReg (penalised)
+
+#### Sweeney
+##### Alone
+```{r}
+w26Sweeney.logitPen <- clogitf(label_binary ~ Sweeney_Add, data = df26_cov, pl=TRUE)
+### get predictions and match to output
+
+beta<-coef(w26Sweeney.logitPen)
+covariates <- c("Sweeney_Add")
+X <- as.matrix(df26_cov[, covariates])
+df26_cov$lp_Sig <- as.numeric(X %*% beta[covariates])
+```
+
+##### W/BMI
+```{r}
+w26BMI.logitPen <- clogitf(label_binary ~ 
+    Sweeney_Add + bmi,
+    data = df26_cov, pl=TRUE
+)
+### get predictions and match to output
+beta<-coef(w26BMI.logitPen)
+covariates <- c("Sweeney_Add", "bmi")
+X <- as.matrix(df26_cov[, covariates])
+df26_cov$lp_SigBMI <- as.numeric(X %*% beta[covariates])
+```
+
+
+##### Run loop
+```{r}
+complete_pairs <- df26_cov |>
+  group_by(pair_id) |>
+  summarise(n_case = sum(label_binary == 1), n_ctrl = sum(label_binary == 0)) |>
+  filter(n_case == 1 & n_ctrl == 1) |>
+  pull(pair_id)
+  
+pair_ids <- complete_pairs 
+
+lp_list<-c("lp_Sig","lp_SigBMI")
+```
+
+
+```{r}
+B<-2000
+s_rows<-c()
+for (lp in lp_list) {
+
+  boot_conc<-numeric(B)
+
+  for (b in seq_len(B)) {
+    boot_pairs<-sample(pair_ids, replace=TRUE)
+    boot_df<-do.call(rbind, lapply(seq_along(boot_pairs), function(i) {
+      p<-boot_pairs[i]
+      rows<-df26_cov[df26_cov$pair_id == p, ]
+      rows$boot_pair_id <-paste0(p, "_rep", i)
+      rows
+      }))
+    
+   boot_conc[b] <-get_concord_pairs(boot_df,"boot_pair_id",lp,"label_binary" )
+   ci_low<-quantile(boot_conc, c(0.025, 0.975))[[1]]
+   ci_high<-quantile(boot_conc, c(0.025, 0.975))[[2]]
+   mean_est <-mean(boot_conc)
+
+  }
+  s_rows[[lp]]<-tibble(
+    signature = "Sweeney-3",
+    predictors = lp,
+    matched_ROC = mean_est,
+    boot_ci_25 = ci_low,
+    boot_ci_95 = ci_high
+  )
+ 
+}
+Sweeney_bootstrap<-bind_rows(s_rows)
+Sweeney_bootstrap
+```
+
+
+
+#### Long-10
+##### Alone
+```{r}
+w26Long.logitPen <- clogitf(label_binary ~ 
+    Long_10,
+    data = df26_cov, pl=TRUE
+)
+### get predictions and match to output
+beta<-coef(w26Long.logitPen)
+covariates <- c("Long_10")
+X <- as.matrix(df26_cov[, covariates])
+df26_cov$lp_Sig <- as.numeric(X %*% beta[covariates])
+```
+
+##### W/BMI
+```{r}
+w26BMI.logitPen <- clogitf(label_binary ~ 
+    Long_10 + bmi,
+    data = df26_cov, pl=TRUE
+)
+### get predictions and match to output
+beta<-coef(w26BMI.logitPen)
+covariates <- c("Long_10", "bmi")
+X <- as.matrix(df26_cov[, covariates])
+df26_cov$lp_SigBMI <- as.numeric(X %*% beta[covariates])
+```
+
+
+##### Run loop
+```{r}
+complete_pairs <- df26_cov |>
+  group_by(pair_id) |>
+  summarise(n_case = sum(label_binary == 1), n_ctrl = sum(label_binary == 0)) |>
+  filter(n_case == 1 & n_ctrl == 1) |>
+  pull(pair_id)
+  
+pair_ids <- complete_pairs 
+
+lp_list<-c("lp_Sig","lp_SigBMI")
+```
+
+
+```{r}
+B<-2000
+l_rows<-c()
+for (lp in lp_list) {
+
+  boot_conc<-numeric(B)
+
+  for (b in seq_len(B)) {
+    boot_pairs<-sample(pair_ids, replace=TRUE)
+    boot_df<-do.call(rbind, lapply(seq_along(boot_pairs), function(i) {
+      p<-boot_pairs[i]
+      rows<-df26_cov[df26_cov$pair_id == p, ]
+      rows$boot_pair_id <-paste0(p, "_rep", i)
+      rows
+      }))
+    
+   boot_conc[b] <-get_concord_pairs(boot_df,"boot_pair_id",lp,"label_binary" )
+   ci_low<-quantile(boot_conc, c(0.025, 0.975))[[1]]
+   ci_high<-quantile(boot_conc, c(0.025, 0.975))[[2]]
+   mean_est <-mean(boot_conc)
+
+  }
+  l_rows[[lp]]<-tibble(
+    signature = "Long-10",
+    predictors = lp,
+    matched_ROC = mean_est,
+    boot_ci_25 = ci_low,
+    boot_ci_95 = ci_high
+  )
+ 
+}
+Long_bootstrap<-bind_rows(l_rows)
+Long_bootstrap
+```
+
+
+#### Plot
+```{r}
+bootstrap_all<-bind_rows(Sweeney_bootstrap,Long_bootstrap)
+
+bootstrap_all$signature<-gdata::reorder.factor(
+    bootstrap_all$signature,
+    new.order = c('Sweeney-3', 'Long-10'))
+bootstrap_all
+```
+
+
+```{r}
+col_palette = c(brewer.pal(8,"Pastel1")[1:8])
+
+ggplot(bootstrap_all, aes(x=predictors, y=matched_ROC, fill=predictors))+
+  geom_bar(stat="identity") +
+  geom_errorbar(aes(ymin=boot_ci_25, ymax=boot_ci_95), width=.2,
+                position=position_dodge(.9)) +
+  theme_bw()+
+  labs(title = "Bootstrapped C-index with percentile CIs for different feature sets",
+       fill = "Features",
+       y = "C-index",
+       x= "Models") +
+  scale_x_discrete(labels= c("Signature", "+ BMI", "+ HR", "+ MLR")) +
+  scale_fill_manual(
+    values= col_palette,
+    labels=c('Signature',
+             'Signature + BMI')
+  ) +
+  facet_wrap(~signature,
+             labeller = as_labeller(c('Sweeney-3' = "Sweeney-3",
+                                      'Long-10' = "Long-10")))
+```
